@@ -9,10 +9,8 @@ body:
         Replace `[area]` in the title with the surface this touches:
         `[plugin]`, `[helper]`, `[packaging]`, `[repo]` or `[docs]`.
 
-        Before proposing an architecture change, please read
-        [`docs/feasibility.md`](https://github.com/ozykhan/iina-airplay/blob/master/docs/feasibility.md) — it
-        records which routes the platform closes off, and why this is a handoff
-        rather than a mirror.
+        This plugin is a handoff, not a mirror: IINA cannot AirPlay its own
+        video output, so the file is packaged and the TV pulls it.
 
   - type: textarea
     id: problem
