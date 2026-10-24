@@ -1,0 +1,219 @@
+// Runs sidebar.html's inline script against stub DOM elements and a fake
+// `iina` bridge, so the page's state table and button wiring are covered by
+// node --test rather than only by clicking around in IINA.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const html = readFileSync(new URL("../sidebar.html", import.meta.url), "utf8");
+const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+const URL_ = "http://192.168.1.2:5000/master.m3u8";
+
+function loadPage() {
+  const els = {};
+  const el = (id) => (els[id] ||= { id, textContent: "", className: "", title: "",
+                                    disabled: false, style: {}, onclick: null, kids: [],
+                                    appendChild(c) { this.kids.push(c); return c; },
+                                    replaceChildren() { this.kids = []; } });
+  const listeners = {};
+  const trackListeners = {};
+  const video = Object.assign(el("v"), {
+    src: "", paused: true, muted: true, currentTime: 0, error: null,
+    seekable: { length: 0 },
+    textTracks: { addEventListener: (name, cb) => { trackListeners[name] = cb; } },
+    addEventListener: (name, cb) => { listeners[name] = cb; },
+    play() { this.paused = false; return Promise.resolve(); },
+    pause() { this.paused = true; },
+    load() {},
+    removeAttribute(k) { if (k === "src") this.src = ""; },
+  });
+  const posted = [];
+  const handlers = {};
+  const context = {
+    document: {
+      getElementById: el,
+      createElement: (tag) => ({ tag, type: "", textContent: "", className: "", onclick: null }),
+    },
+    iina: {
+      postMessage: (name, data) => posted.push([name, data]),
+      onMessage: (name, cb) => { handlers[name] = cb; },
+    },
+    setInterval: () => 0,
+  };
+  vm.runInNewContext(script, context);
+  return {
+    video, posted, els,
+    state: (s) => handlers.state(Object.assign(
+      { pct: 0, msg: null, duration: 100, sync: null, subs: { label: "", warn: false } }, s)),
+    fire: (name, ev) => listeners[name](ev || {}),
+    addTrack: (track) => trackListeners.addtrack({ track }),
+    click: (id) => els[id].onclick(),
+  };
+}
+
+// The element fails once (auto-retried), then again: a page-side failure.
+function failTwice(p) {
+  p.video.error = { code: 3 };
+  p.fire("error");
+  p.fire("error");
+}
+
+test("a page-side media error shows Couldn't cast with Try again", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_ });
+  assert.equal(p.video.src, URL_);
+  failTwice(p);
+  p.state({ phase: "ready", url: URL_ });
+  assert.equal(p.els.headline.textContent, "Couldn't cast");
+  assert.match(p.els.sub.textContent, /media error 3/);
+  assert.equal(p.els.primary.textContent, "Try again");
+});
+
+// The helper is still serving: Try again reloads the stream in the page. It
+// must not ask main.js to start (a no-op while a cast is live) nor restart
+// the pipeline (a repackage can't fix a page-side load failure).
+test("Try again after a page-side error reloads the stream, no start", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_ });
+  failTwice(p);
+  p.state({ phase: "ready", url: URL_ });
+  p.posted.length = 0;
+
+  p.click("primary");
+  assert.deepEqual(p.posted.map(([n]) => n).filter((n) => n === "start" || n === "stop"), []);
+
+  p.video.error = null;
+  p.state({ phase: "ready", url: URL_ });
+  assert.equal(p.video.src, URL_);
+  assert.equal(p.els.headline.textContent, "Ready to send");
+});
+
+// WebKit deselects every subtitle option on the AVPlayerItem when it first
+// loads the stream's tracks on the Mac, and a TV picked afterwards inherits
+// that selection: no subtitles on a first cast (#38). The only subtitle track
+// is the one the user had on in IINA, so the page selects it again.
+test("the stream's subtitle track is selected, so the TV inherits it", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_ });
+  const subs = { kind: "subtitles", mode: "disabled" };
+  const meta = { kind: "metadata", mode: "disabled" };
+  p.addTrack(subs);
+  p.addTrack(meta);
+  assert.equal(subs.mode, "hidden");
+  assert.equal(meta.mode, "disabled");
+});
+
+test("Try again after a pipeline error starts a new cast", () => {
+  const p = loadPage();
+  p.state({ phase: "error", url: null, msg: "ffmpeg: exit status 1" });
+  assert.equal(p.els.primary.textContent, "Try again");
+  p.click("primary");
+  assert.deepEqual(p.posted.map(([n]) => n).filter((n) => n === "cast"), ["cast"]);
+});
+
+// Issue #42: WebKit's media error 4 carries no reason, so the page hands the
+// failure to main.js, which probes the URL and sends back a diagnosis.
+test("a page-side media error is reported to main.js with its URL and code", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_ });
+  p.video.error = { code: 4 };
+  p.fire("error");
+  assert.deepEqual(p.posted.filter(([n]) => n === "mediaError"), [], "the automatic retry is not a failure yet");
+  p.fire("error");
+  // JSON round-trip: the page's object literal comes from the vm's realm.
+  assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "mediaError"))),
+    [["mediaError", { url: URL_, code: 4 }]]);
+});
+
+test("main.js's diagnosis for the loaded stream replaces the bare media error", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_ });
+  p.video.error = { code: 4 };
+  p.fire("error");
+  p.fire("error");
+  p.state({ phase: "ready", url: URL_, diag: { url: URL_, msg: "This Mac can't reach its own stream" } });
+  assert.equal(p.els.headline.textContent, "Couldn't cast");
+  assert.equal(p.els.sub.textContent, "This Mac can't reach its own stream");
+  assert.equal(p.els.sub.title, "This Mac can't reach its own stream");
+});
+
+test("a diagnosis for another stream is not shown", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_ });
+  p.video.error = { code: 4 };
+  p.fire("error");
+  p.fire("error");
+  p.state({ phase: "ready", url: URL_, diag: { url: "http://192.168.1.2:4000/master.m3u8", msg: "stale" } });
+  assert.match(p.els.sub.textContent, /media error 4/);
+});
+
+test("a diagnosis alone does not put the page in the error row", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", url: URL_, diag: { url: URL_, msg: "old" } });
+  assert.equal(p.els.headline.textContent, "Ready to send");
+});
+
+test("the idle page has one Send to TV button", () => {
+  const p = loadPage();
+  p.state({ phase: "idle" });
+  assert.equal(p.els.primary.textContent, "Send to TV");
+  assert.equal(p.els.secondary.className, "quiet hide");
+  p.posted.length = 0;
+  p.click("primary");
+  assert.deepEqual(p.posted.map(([n]) => n).filter((n) => n === "cast"), ["cast"]);
+});
+
+test("a DLNA device button starts a cast to that renderer", () => {
+  const p = loadPage();
+  p.state({
+    phase: "browsing", mode: "dlna",
+    devices: [{ name: "CustomCars", control: "http://192.168.0.220/ctl", host: "192.168.0.220" }],
+  });
+  assert.equal(p.els.headline.textContent, "Choose a TV");
+  assert.equal(p.els.primary.className, "hide");
+  const button = p.els.devices.kids[0];
+  assert.equal(button.textContent, "CustomCars");
+  p.posted.length = 0;
+  button.onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "start"))),
+    [["start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "CustomCars" }]]);
+});
+
+test("an AirPlay row starts the AirPlay handoff", () => {
+  const p = loadPage();
+  p.state({
+    phase: "browsing",
+    devices: [
+      { kind: "dlna", name: "CustomCars", control: "http://192.168.0.220/ctl", host: "192.168.0.220" },
+      { kind: "airplay", name: "Lounge", control: "", host: "" },
+    ],
+  });
+  const air = p.els.devices.kids[1];
+  assert.equal(air.textContent, "Lounge (AirPlay)");
+  p.posted.length = 0;
+  air.onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "start"))),
+    [["start", {}]]);
+});
+
+test("a DLNA url is not loaded into the AirPlay video element", () => {
+  const p = loadPage();
+  p.state({ phase: "ready", mode: "dlna", url: "http://192.168.0.84:9/media", dlnaName: "CustomCars" });
+  assert.equal(p.video.src, "");
+  assert.equal(p.els.headline.textContent, "Sending to CustomCars");
+});
+
+test("DLNA playback reports the TV clock and forwards a seek", () => {
+  const p = loadPage();
+  p.state({
+    phase: "ready", mode: "dlna", url: "http://192.168.0.84:9/media", dlnaName: "CustomCars",
+    duration: 100, tv: { pos: 12, paused: false, ended: false },
+    sync: { seq: 1, paused: false, seekTo: { seq: 1, pos: 40 }, startPos: 0 },
+  });
+  assert.equal(p.els.headline.textContent, "Playing on TV");
+  assert.equal(p.els.elapsed.textContent, "0:12");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "dlnaCtl"))),
+    [["dlnaCtl", { action: "seek", pos: 40 }]]);
+});

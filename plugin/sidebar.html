@@ -1,0 +1,441 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>iina cast</title>
+<style>
+  :root {
+    --glass-fill-top: rgba(0, 0, 0, 0.06);
+    --glass-fill-bot: rgba(0, 0, 0, 0.02);
+    --glass-edge: rgba(0, 0, 0, 0.08);
+    --glass-spec: rgba(255, 255, 255, 0.70);
+    --track: rgba(0, 0, 0, 0.10);
+    --neutral-btn: rgba(0, 0, 0, 0.06);
+    --ink: #1C1C1E;
+    --ink-2: rgba(0, 0, 0, 0.55);
+    --accent: #007AFF;
+    --accent-hi: #40A0FF;
+    --warn: #8A5B06;
+    --shade: rgba(0, 0, 0, 0.28);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --glass-fill-top: rgba(255, 255, 255, 0.13);
+      --glass-fill-bot: rgba(255, 255, 255, 0.035);
+      --glass-edge: rgba(255, 255, 255, 0.10);
+      --glass-spec: rgba(255, 255, 255, 0.22);
+      --track: rgba(255, 255, 255, 0.13);
+      --neutral-btn: rgba(255, 255, 255, 0.09);
+      --ink: #F2F3F5;
+      --ink-2: rgba(255, 255, 255, 0.58);
+      --accent: #0A84FF;
+      --accent-hi: #3D9BFF;
+      --warn: #F0C169;
+      --shade: rgba(255, 255, 255, 0.90);
+    }
+  }
+
+  html, body { margin: 0; background: transparent; color: var(--ink);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased; }
+  video { width: 1px; height: 1px; opacity: 0.01; position: absolute; }
+  #wrap { padding: 12px; }
+
+  #card {
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 14px; border-radius: 16px;
+    background: linear-gradient(180deg, var(--glass-fill-top), var(--glass-fill-bot));
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    backdrop-filter: blur(22px) saturate(180%);
+    border: 1px solid var(--glass-edge);
+    box-shadow: inset 0 1px 0 var(--glass-spec), 0 8px 22px rgba(0, 0, 0, 0.16);
+  }
+
+  .row { display: flex; align-items: center; gap: 8px; }
+  .spread { justify-content: space-between; }
+  .grow { min-width: 0; }
+
+  #head { color: var(--ink-2); }
+  #head svg { width: 16px; height: 16px; flex: none; }
+  #cap { font-size: 10px; font-weight: 600; letter-spacing: 0.09em;
+    text-transform: uppercase; }
+
+  #dot { width: 6px; height: 6px; border-radius: 50%; flex: none;
+    background: transparent; }
+  #dot.busy { background: #E0A93C; box-shadow: 0 0 7px rgba(224, 169, 60, 0.75); }
+  #dot.live { background: #30C24E; box-shadow: 0 0 7px rgba(48, 194, 78, 0.75); }
+  #dot.bad  { background: #E0523C; box-shadow: 0 0 7px rgba(224, 82, 60, 0.75); }
+
+  #headline { margin: 0; font-size: 15px; font-weight: 590;
+    letter-spacing: -0.01em; }
+  #sub { margin: 0; font-size: 12px; color: var(--ink-2); }
+  #sub.warn { color: var(--warn); }
+  #headline, #sub { overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+
+  #meter { display: flex; flex-direction: column; gap: 6px; }
+  #bar { height: 5px; border-radius: 3px; background: var(--track);
+    overflow: hidden; }
+  #fill { height: 100%; width: 0; border-radius: 3px;
+    background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+    transition: width 0.4s cubic-bezier(0.32, 0.72, 0, 1); }
+  #fill.done { background: var(--shade); }
+  #times { font-size: 11.5px; color: var(--ink-2);
+    font-variant-numeric: tabular-nums; }
+
+  #actions { display: flex; flex-direction: column; gap: 6px; }
+  #devices { display: flex; flex-direction: column; gap: 6px; }
+  #devices.hide { display: none; }
+  button { display: block; width: 100%; padding: 9px 12px; border: none;
+    border-radius: 11px; font: inherit; font-size: 13px; font-weight: 590;
+    cursor: pointer; color: var(--ink); background: var(--neutral-btn);
+    box-shadow: inset 0 1px 0 var(--glass-spec); }
+  button.accent { color: #fff;
+    background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35),
+                0 4px 12px rgba(10, 111, 232, 0.30); }
+  button.quiet { background: transparent; box-shadow: none;
+    color: var(--ink-2); font-weight: 500; font-size: 12.5px; padding: 5px; }
+  button:disabled { color: var(--ink-2); background: var(--neutral-btn);
+    box-shadow: none; cursor: default; opacity: 0.6; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hide { display: none; }
+  #meter.hide { display: none; }
+
+  @media (prefers-reduced-motion: reduce) { #fill { transition: none; } }
+</style>
+
+<div id="wrap">
+  <div id="card">
+    <div class="row spread" id="head">
+      <div class="row" style="gap:6px">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2.4" y="3.4" width="19.2" height="13" rx="2.6" stroke="currentColor" stroke-width="1.6" opacity="0.75"/><path d="M12 14.4 17 21H7z" fill="currentColor"/></svg>
+        <span id="cap">iina cast</span>
+      </div>
+      <span id="dot"></span>
+    </div>
+    <div class="grow">
+      <p id="headline">Preparing…</p>
+      <p id="sub"></p>
+    </div>
+    <div id="meter" class="hide">
+      <div id="bar"><div id="fill"></div></div>
+      <div class="row spread" id="times">
+        <span id="elapsed"></span><span id="total"></span>
+      </div>
+    </div>
+    <div id="actions">
+      <div id="devices" class="hide"></div>
+      <button id="primary" type="button" class="hide"></button>
+      <button id="secondary" type="button" class="quiet hide"></button>
+    </div>
+  </div>
+</div>
+<video id="v" autoplay muted playsinline x-webkit-airplay="allow"></video>
+
+<script>
+  var v = document.getElementById("v");
+  var dot = document.getElementById("dot");
+  var headline = document.getElementById("headline");
+  var subEl = document.getElementById("sub");
+  var meter = document.getElementById("meter");
+  var fill = document.getElementById("fill");
+  var elapsedEl = document.getElementById("elapsed");
+  var totalEl = document.getElementById("total");
+  var primary = document.getElementById("primary");
+  var secondary = document.getElementById("secondary");
+  var loadedURL = null;
+  var retried = false;      // known WebKit flake: first load may fail once
+  var airplayAvailable = false;
+  var onTV = false;
+  var casting = false;
+  var appliedSeq = 0;
+  var initialSeekPending = false;
+  var ended = false;
+  var localErr = "";        // page-side media failure, distinct from state.msg
+  var primaryAct = "start"; // what #primary does: "start" | "reload" | "pick" | "stop" | "dlna"
+  var secondaryAct = null;  // what #secondary does: null | "pick" | "stop" | "dlna"
+  var pageState = null;
+  var deviceKey = "";
+
+  function deviceLabel(d, all) {
+    var same = 0;
+    for (var i = 0; i < all.length; i++) if (all[i].name === d.name && all[i].kind === d.kind) same++;
+    var name = same > 1 && d.host ? d.name + " (" + d.host + ")" : (d.name || d.host || "TV");
+    if (d.kind === "airplay") return name + " (AirPlay)";
+    return name;
+  }
+
+  function renderDevices(s) {
+    var box = document.getElementById("devices");
+    var list = s.phase === "browsing" ? (s.devices || []) : [];
+    var key = "";
+    for (var i = 0; i < list.length; i++) key += (list[i].kind || "") + "\0" + (list[i].control || "") + "\n";
+    if (key === deviceKey) {
+      box.className = list.length ? "" : "hide";
+      return;
+    }
+    deviceKey = key;
+    box.className = list.length ? "" : "hide";
+    if (box.replaceChildren) box.replaceChildren();
+    else box.textContent = "";
+    for (var j = 0; j < list.length; j++) {
+      (function (dev) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.textContent = deviceLabel(dev, list);
+        b.onclick = function () {
+          if (dev.kind === "airplay") iina.postMessage("start", {});
+          else iina.postMessage("start", { mode: "dlna", control: dev.control, name: dev.name || "" });
+        };
+        box.appendChild(b);
+      })(list[j]);
+    }
+  }
+
+  function applySync(s) {
+    var sync = s && s.sync;
+    if (!sync) return;
+    if (s.mode === "dlna") {
+      if (!s.tv || sync.seq <= appliedSeq) return;
+      if (sync.seekTo && sync.seekTo.seq > appliedSeq) {
+        iina.postMessage("dlnaCtl", { action: "seek", pos: sync.seekTo.pos });
+      }
+      // A seek while already playing must not also send Play: some renderers
+      // restart the file. Pause is sent only when it actually changed.
+      if (!!sync.paused !== !!s.tv.paused) {
+        iina.postMessage("dlnaCtl", { action: sync.paused ? "pause" : "play" });
+      }
+      appliedSeq = sync.seq;
+      return;
+    }
+    if (!loadedURL) return;
+    if (sync.seq > appliedSeq) {
+      // seekTo carries its own seq so a later pause command doesn't replay a
+      // seek this page already performed.
+      if (sync.seekTo && sync.seekTo.seq > appliedSeq) {
+        v.currentTime = sync.seekTo.pos;
+        initialSeekPending = false;   // an explicit user seek supersedes it
+      }
+      if (sync.paused && !v.paused) v.pause();
+      else if (!sync.paused && v.paused) v.play().catch(function () {});
+      appliedSeq = sync.seq;
+    }
+    if (initialSeekPending && onTV && sync.startPos > 0) {
+      // Best-effort (spec): jump to where IINA was, but only once packaging
+      // has reached that point; until then the TV plays from the start and
+      // the mirror follows it.
+      try {
+        if (v.seekable.length &&
+            v.seekable.end(v.seekable.length - 1) >= sync.startPos) {
+          v.currentTime = sync.startPos;
+          initialSeekPending = false;
+        }
+      } catch (e) { initialSeekPending = false; }
+    }
+  }
+
+  function teardownLocal() {
+    v.pause(); v.removeAttribute("src"); v.load();
+    loadedURL = null; retried = false; onTV = false;
+    v.muted = true; appliedSeq = 0; ended = false; initialSeekPending = false;
+  }
+  function showPicker() {
+    if (v.webkitShowPlaybackTargetPicker) v.webkitShowPlaybackTargetPicker();
+  }
+  function clock(sec) {
+    if (!(sec > 0)) return "0:00";
+    var t = Math.floor(sec), h = Math.floor(t / 3600),
+        m = Math.floor((t % 3600) / 60), s = t % 60;
+    var mm = h > 0 && m < 10 ? "0" + m : String(m);
+    return (h > 0 ? h + ":" : "") + mm + ":" + (s < 10 ? "0" + s : s);
+  }
+
+  function render(s) {
+    pageState = s;
+    casting = s.phase === "starting" || s.phase === "ready" || s.phase === "packaged";
+    if (!casting && loadedURL) {
+      // main.js tore the cast down (helper died, file changed, TV ended):
+      // drop the stream locally too, or the element keeps AirPlaying a corpse.
+      teardownLocal();
+    }
+    applySync(s);
+    present(s);
+    // A DLNA renderer pulls the file itself. Loading that URL into this
+    // <video> would play it on the Mac and try to AirPlay it as well.
+    if (s.mode !== "dlna" && (s.phase === "ready" || s.phase === "packaged") && s.url && s.url !== loadedURL) {
+      loadedURL = s.url;
+      retried = false;
+      // -1, not 0: the mirror's very first sync (seq 0) carries the cast's
+      // initial paused snapshot, and applySync's `sync.seq > appliedSeq` gate
+      // would otherwise never let it through, autoplaying over a paused mpv.
+      appliedSeq = -1; ended = false; initialSeekPending = true;
+      v.src = s.url;
+      v.play().catch(function () {});
+    }
+  }
+
+  // One row of the spec's state table per branch. `act` is what the primary
+  // button does when clicked: "start", "pick", or "stop".
+  function present(s) {
+    var subs = s.subs || { label: "", warn: false };
+    var r;
+    if (s.phase === "error" || localErr) {
+      // A page-side media failure is still a failed cast from the user's side,
+      // so it takes the same row. state.msg wins when both are set: main.js
+      // knows why the pipeline died, the <video> element only knows it choked.
+      // While the cast is still live only the page failed: the helper is
+      // still serving, so Try again reloads the stream rather than asking
+      // main.js to start (a no-op mid-cast) or repackaging from scratch.
+      var diag = s.diag && s.diag.url === loadedURL ? s.diag.msg : "";
+      r = { dot: "bad", headline: "Couldn't cast", sub: s.msg || diag || localErr,
+            warn: true, meter: false, pct: 0, done: false,
+            primary: "Try again", act: casting ? "reload" : "cast",
+            accent: true, off: false,
+            secondary: casting ? "Stop casting" : null,
+            sact: casting ? "stop" : null };
+    } else if (s.phase === "browsing") {
+      var found = (s.devices || []).length;
+      r = { dot: found ? "" : "busy",
+            headline: found ? "Choose a TV" : (s.msg ? "No TVs found" : "Looking for a TV…"),
+            sub: found ? "More than one television is on the network" : (s.msg || "Searching the local network"),
+            warn: !!s.msg && !found, meter: false, pct: 0, done: false,
+            primary: found ? "" : (s.msg ? "Try again" : "Searching…"),
+            act: "cast", accent: true, off: !s.msg,
+            secondary: "Cancel", sact: "stop" };
+    } else if (!casting) {
+      r = { dot: "", headline: "Not casting", sub: subs.label,
+            warn: subs.warn, meter: false, pct: 0, done: false,
+            primary: "Send to TV", act: "cast", accent: true, off: false,
+            secondary: null, sact: null };
+    } else if (s.phase === "starting") {
+      var preparing = s.mode === "dlna";
+      r = { dot: "busy", headline: preparing ? "Preparing the file" : "Packaging",
+            sub: subs.label, warn: subs.warn, meter: true, pct: s.pct || 0, done: false,
+            primary: preparing ? "Stop casting" : "Send to TV",
+            act: preparing ? "stop" : "pick", accent: !preparing, off: !preparing,
+            secondary: preparing ? null : "Cancel", sact: preparing ? null : "stop" };
+    } else if (onTV || (s.mode === "dlna" && s.tv)) {
+      var pos = s.mode === "dlna" ? (s.tv.pos || 0) : (v.currentTime || 0);
+      r = { dot: "live", headline: "Playing on TV",
+            sub: s.mode === "dlna" && s.dlnaName ? s.dlnaName : subs.label,
+            warn: subs.warn && s.mode !== "dlna", meter: true, done: false,
+            pct: s.duration > 0 ? (pos / s.duration) * 100 : 0,
+            primary: "Stop casting", act: "stop", accent: false, off: false,
+            secondary: s.mode === "dlna" ? null : "Send to another TV",
+            sact: s.mode === "dlna" ? null : "pick" };
+    } else if (s.mode === "dlna") {
+      r = { dot: "busy", headline: "Sending to " + (s.dlnaName || "TV"),
+            sub: subs.label, warn: subs.warn, meter: true,
+            pct: s.pct || 0, done: false,
+            primary: "Stop casting", act: "stop", accent: false, off: false,
+            secondary: null, sact: null };
+    } else {
+      var packaged = s.phase === "packaged";
+      r = { dot: "", headline: "Ready to send",
+            sub: airplayAvailable ? subs.label : "Waiting for AirPlay devices…",
+            warn: airplayAvailable && subs.warn,
+            meter: true, pct: packaged ? 100 : (s.pct || 0), done: packaged,
+            primary: "Send to TV", act: "pick", accent: true,
+            off: !airplayAvailable, secondary: "Stop casting", sact: "stop" };
+    }
+
+    dot.className = r.dot;
+    headline.textContent = r.headline;
+    subEl.textContent = r.sub;
+    subEl.title = r.sub;                 // the full string, when it ellipsizes
+    subEl.className = r.warn ? "warn" : "";
+
+    meter.className = r.meter ? "" : "hide";
+    fill.style.width = Math.max(0, Math.min(100, r.pct)) + "%";
+    fill.className = r.done ? "done" : "";
+    elapsedEl.textContent = onTV ? clock(v.currentTime || 0)
+                          : (s.mode === "dlna" && s.tv) ? clock(s.tv.pos || 0)
+                          : s.phase === "packaged" ? "Packaged"
+                          : Math.round(s.pct || 0) + "%";
+    totalEl.textContent = s.duration > 0 ? clock(s.duration) : "";
+
+    primary.textContent = r.primary || "";
+    primary.disabled = r.off || !r.primary;
+    primary.className = !r.primary ? "hide" : (r.accent && !r.off ? "accent" : "");
+    primaryAct = r.act;
+    renderDevices(s);
+
+    secondary.textContent = r.secondary || "";
+    secondary.className = r.secondary ? "quiet" : "quiet hide";
+    secondaryAct = r.sact;
+  }
+
+  v.addEventListener("error", function () {
+    if (!loadedURL) return;                // src cleared by a stop, not a real failure
+    if (!retried) {                        // retry exactly once (docs/prototype.md)
+      retried = true;
+      v.src = loadedURL;
+      v.play().catch(function () {});
+    } else {
+      var code = v.error ? v.error.code : null;
+      localErr = "Stream failed to load (media error " + (code === null ? "?" : code) + ").";
+      // Error 4 never says why (issue #42); main.js probes the URL and
+      // answers with state.diag, which replaces localErr once it arrives.
+      iina.postMessage("mediaError", { url: loadedURL, code: code });
+    }
+  });
+  v.addEventListener("webkitplaybacktargetavailabilitychanged", function (ev) {
+    airplayAvailable = ev.availability === "available";
+  });
+  v.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", function () {
+    onTV = !!v.webkitCurrentPlaybackTargetIsWireless;
+    v.muted = !onTV;   // silent on the Mac, audible on the TV
+  });
+  v.addEventListener("ended", function () { ended = true; });
+  // WebKit deselects every subtitle option on the AVPlayerItem as soon as it
+  // loads the stream's tracks on the Mac (processMediaSelectionOptions), and
+  // a TV picked after that inherits the empty selection: a first cast came up
+  // without subtitles, a second one (straight onto the TV) with them (#38).
+  // The stream only carries a subtitle track when one was on in IINA, so
+  // select it. "hidden" selects it without drawing it on the 1px element.
+  v.textTracks.addEventListener("addtrack", function (ev) {
+    var t = ev.track;
+    if (t.kind === "subtitles" || t.kind === "captions") t.mode = "hidden";
+  });
+  primary.onclick = function () {
+    if (primaryAct === "pick") showPicker();
+    else if (primaryAct === "cast") {
+      localErr = ""; teardownLocal(); iina.postMessage("cast", {});
+    } else if (primaryAct === "reload") {
+      // render() reloads s.url once loadedURL is cleared; ask for state now
+      // instead of waiting out the poll.
+      localErr = ""; teardownLocal(); iina.postMessage("getState", {});
+    } else if (primaryAct === "stop") {
+      localErr = ""; teardownLocal(); iina.postMessage("stop", {});
+    } else {
+      localErr = ""; teardownLocal(); iina.postMessage("start", {});
+    }
+  };
+  secondary.onclick = function () {
+    if (secondaryAct === "pick") showPicker();
+    else if (secondaryAct === "stop") {
+      localErr = ""; teardownLocal(); iina.postMessage("stop", {});
+    }
+  };
+  iina.onMessage("state", render);
+  setInterval(function () {
+    iina.postMessage("getState", {});
+    if (pageState && pageState.mode === "dlna" && pageState.tv && casting) {
+      iina.postMessage("tvState", {
+        appliedSeq: appliedSeq,
+        pos: pageState.tv.pos || 0,
+        paused: !!pageState.tv.paused,
+        wireless: true,
+        ended: !!pageState.tv.ended,
+      });
+    } else if (casting && loadedURL) {
+      iina.postMessage("tvState", {
+        appliedSeq: appliedSeq,
+        pos: v.currentTime || 0,
+        paused: v.paused,
+        wireless: onTV,
+        ended: ended,
+      });
+    }
+  }, 500);
+  iina.postMessage("getState", {});
+</script>

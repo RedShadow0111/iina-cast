@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Send to TV</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent;
+    overflow: hidden; }
+  button {
+    position: fixed; right: 16px; bottom: 92px;
+    height: 28px; padding: 0 10px 0 8px;
+    display: flex; align-items: center; gap: 6px;
+    border: none; border-radius: 8px; cursor: pointer;
+    color: #fff; background: rgba(28, 28, 30, 0.78);
+    font: 600 12px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  }
+  button svg { width: 16px; height: 16px; flex: none; }
+  button.busy { opacity: 0.85; }
+  #list {
+    position: fixed; right: 16px; bottom: 128px;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  }
+  #list.hide { display: none; }
+  #list button { position: static; max-width: 220px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+</style>
+<div id="list" class="hide"></div>
+<button id="b" type="button" data-clickable>
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="2.4" y="4" width="19.2" height="12.2" rx="2.2" stroke="currentColor" stroke-width="1.7"/>
+    <path d="M8 20.2h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  </svg>
+  <span id="t">На ТВ</span>
+</button>
+<script>
+  var btn = document.getElementById("b");
+  var label = document.getElementById("t");
+  var phase = "idle";
+  var mode = "";
+  var onTV = false;
+  var choosing = false;
+  var deviceKey = "";
+  function deviceLabel(d) {
+    var name = d.name || d.host || "TV";
+    if (d.kind === "airplay") return name + " (AirPlay)";
+    return name;
+  }
+  function renderDevices(list) {
+    var box = document.getElementById("list");
+    var key = "";
+    for (var i = 0; i < list.length; i++) key += (list[i].kind || "") + "\0" + (list[i].control || "") + "\n";
+    if (key === deviceKey) {
+      box.className = list.length ? "" : "hide";
+      return;
+    }
+    deviceKey = key;
+    box.className = list.length ? "" : "hide";
+    if (box.replaceChildren) box.replaceChildren();
+    else box.textContent = "";
+    for (var j = 0; j < list.length; j++) {
+      (function (dev) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.setAttribute("data-clickable", "");
+        b.textContent = deviceLabel(dev);
+        b.onclick = function () {
+          iina.postMessage("pick", {
+            kind: dev.kind || "dlna",
+            control: dev.control || "",
+            name: dev.name || "",
+          });
+        };
+        box.appendChild(b);
+      })(list[j]);
+    }
+  }
+  function show(s) {
+    s = s || {};
+    phase = s.phase || "idle";
+    mode = s.mode || "";
+    onTV = !!s.tv;
+    var devices = phase === "browsing" ? (s.devices || []) : [];
+    renderDevices(devices);
+    choosing = devices.length > 0;
+    var text = "На ТВ";
+    var busy = false;
+    var title = "На телевизор";
+    if (phase === "browsing" && choosing) {
+      text = "Отмена"; busy = false; title = "Несколько телевизоров";
+    } else if (phase === "browsing") { text = "Поиск…"; busy = true; title = "Ищем телевизор"; }
+    else if (phase === "starting") {
+      text = Math.round(s.pct || 0) + "%";
+      busy = true;
+      title = mode === "dlna" ? "Копируем выбранные дорожки" : "Готовим поток";
+    } else if (phase === "ready" || phase === "packaged") {
+      if (mode === "dlna") {
+        text = s.tv ? "Стоп" : "Отправка…";
+        busy = !s.tv;
+        title = s.dlnaName || "Телевизор";
+      } else {
+        text = "AirPlay";
+        title = "Выберите телевизор в боковой панели";
+      }
+    } else if (phase === "error") {
+      title = s.msg || "Не удалось отправить";
+    }
+    label.textContent = text;
+    btn.title = title;
+    btn.className = busy ? "busy" : "";
+  }
+  btn.onclick = function () {
+    // A second click during the search or the copy must not cancel it.
+    // Choosing among several TVs can: Отмена drops the list.
+    if (phase === "browsing") {
+      if (choosing) iina.postMessage("stop", {});
+      return;
+    }
+    if (phase === "starting") return;
+    if (phase === "ready" || phase === "packaged") {
+      if (mode === "dlna" && onTV) iina.postMessage("stop", {});
+      return;
+    }
+    iina.postMessage("cast", {});
+  };
+  iina.onMessage("state", show);
+  setInterval(function () { iina.postMessage("getState", {}); }, 500);
+  iina.postMessage("getState", {});
+</script>

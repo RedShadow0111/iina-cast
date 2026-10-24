@@ -1,0 +1,14 @@
+{
+  "name": "iina cast",
+  "identifier": "dev.redshadow.iina-cast",
+  "version": "0.5.0",
+  "ghRepo": "RedShadow0111/iina-cast",
+  "ghVersion": 1,
+  "author": { "name": "RedShadow0111" },
+  "description": "Send the current file to a TV. A real Apple TV uses AirPlay; other televisions use DLNA. The audio track and subtitles are the ones selected in IINA, at the original quality.",
+  "entry": "main.js",
+  "permissions": ["file-system", "show-osd"],
+  "sidebarTab": { "name": "iina cast" },
+  "preferencesPage": "preferences.html",
+  "preferenceDefaults": { "lanIP": "", "showPlayerButton": true }
+}
