@@ -9,7 +9,7 @@ import (
 // media and subtitle playlists, the fMP4 init segment, media segments and
 // WebVTT segments. The pidfile is deliberately not here — it belongs to
 // the process lifecycle, not the cast.
-var castArtifacts = []string{"index.m3u8", "master.m3u8", "*_vtt.m3u8", "*.vtt", "init.mp4", "seg_*.m4s", "media.mp4", "media.ts", "sub.srt", "hold"}
+var castArtifacts = []string{"index.m3u8", "master.m3u8", "*_vtt.m3u8", "*.vtt", "init.mp4", "seg_*.m4s", "seg_*.ts", "media.mp4", "now.mp4", "rest.mp4", "media.ts", "sub.srt", "hold", "cast.cmd"}
 
 // cleanOutDir removes every cast artifact from dir. A remux is a second
 // copy of the source's bitstreams, so this runs on every exit path, not

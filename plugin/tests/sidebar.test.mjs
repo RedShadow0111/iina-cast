@@ -174,11 +174,27 @@ test("a DLNA device button starts a cast to that renderer", () => {
   assert.equal(p.els.headline.textContent, "Choose a TV");
   assert.equal(p.els.primary.className, "hide");
   const button = p.els.devices.kids[0];
-  assert.equal(button.textContent, "CustomCars");
+  assert.equal(button.textContent, "CustomCars (DLNA)");
   p.posted.length = 0;
   button.onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "start"))),
     [["start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "CustomCars" }]]);
+});
+
+test("a Chromecast row starts a cast to that device", () => {
+  const p = loadPage();
+  p.state({
+    phase: "browsing",
+    devices: [
+      { kind: "cast", name: "Спальня", host: "192.168.0.50", port: 8009, model: "Chromecast", control: "192.168.0.50:8009" },
+    ],
+  });
+  const button = p.els.devices.kids[0];
+  assert.equal(button.textContent, "Спальня (Chromecast)");
+  p.posted.length = 0;
+  button.onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "start"))),
+    [["start", { mode: "cast", host: "192.168.0.50", port: 8009, name: "Спальня", model: "Chromecast" }]]);
 });
 
 test("an AirPlay row starts the AirPlay handoff", () => {

@@ -12,7 +12,7 @@ import (
 // dropped in the directory is not ours to touch.
 func TestCleanOutDirRemovesCastArtifactsOnly(t *testing.T) {
 	dir := t.TempDir()
-	artifacts := []string{"index.m3u8", "master.m3u8", "index_vtt.m3u8", "init.mp4", "seg_0000.m4s", "seg_0001.m4s", "seg_0000.vtt", "media.mp4", "media.ts", "sub.srt", "hold"}
+	artifacts := []string{"index.m3u8", "master.m3u8", "index_vtt.m3u8", "init.mp4", "seg_0000.m4s", "seg_0001.m4s", "seg_0000.ts", "seg_0000.vtt", "media.mp4", "now.mp4", "rest.mp4", "media.ts", "sub.srt", "hold", "cast.cmd"}
 	keep := []string{"helper.pid", "notes.txt"}
 	for _, f := range append(append([]string{}, artifacts...), keep...) {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {

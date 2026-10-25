@@ -63,14 +63,14 @@ test("searching does not cancel, and several TVs are a choice", () => {
   });
   assert.equal(p.label.textContent, "Отмена");
   assert.equal(p.list.kids.length, 2);
-  assert.equal(p.list.kids[0].textContent, "CustomCars");
+  assert.equal(p.list.kids[0].textContent, "CustomCars (DLNA)");
   assert.equal(p.list.kids[1].textContent, "Lounge (AirPlay)");
   p.posted.length = 0;
   p.list.kids[0].onclick();
   p.list.kids[1].onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "pick"))), [
-    ["pick", { kind: "dlna", control: "http://192.168.0.220/ctl", name: "CustomCars" }],
-    ["pick", { kind: "airplay", control: "", name: "Lounge" }],
+    ["pick", { kind: "dlna", control: "http://192.168.0.220/ctl", name: "CustomCars", host: "192.168.0.220", port: 0, model: "" }],
+    ["pick", { kind: "airplay", control: "", name: "Lounge", host: "", port: 0, model: "" }],
   ]);
   p.posted.length = 0;
   p.click();

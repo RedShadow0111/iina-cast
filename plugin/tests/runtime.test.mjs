@@ -698,6 +698,32 @@ test("Send to TV searches from the configured LAN address", () => {
   assert.equal(p.state().phase, "browsing");
 });
 
+test("one Chromecast starts a Cast session", () => {
+  const p = loadPlugin();
+  p.clickMenu();
+  p.helperSays({ event: "devices", devices: [], airplay: [{ name: "CustomCars", model: "AppleTV3,1" }],
+    cast: [{ name: "Спальня", model: "Chromecast", host: "192.168.0.50", port: 8009, id: "abc" }] });
+  p.send("getState");
+  assert.equal(serves(p).length, 1);
+  const args = serves(p)[0].args;
+  assert.equal(args[args.indexOf("-mode") + 1], "cast");
+  assert.equal(args[args.indexOf("-cast-host") + 1], "192.168.0.50");
+  assert.equal(args[args.indexOf("-cast-port") + 1], "8009");
+  assert.equal(args[args.indexOf("-cast-model") + 1], "Chromecast");
+});
+
+test("a Chromecast and a DLNA screen wait for a choice", () => {
+  const p = loadPlugin();
+  p.clickMenu();
+  p.helperSays({ event: "devices", devices: [
+    { name: "CustomCars", control: "http://192.168.0.220/ctl", host: "192.168.0.220" },
+  ], airplay: [], cast: [{ name: "Спальня", model: "Chromecast", host: "192.168.0.50", port: 8009 }] });
+  p.send("getState");
+  assert.equal(serves(p).length, 0);
+  assert.equal(p.state().devices.length, 2);
+  assert.equal(p.state().devices[1].kind, "cast");
+});
+
 test("one DLNA television starts without a second click", () => {
   const p = loadPlugin();
   p.clickMenu();
