@@ -273,8 +273,9 @@ func runDiscover(argv []string) {
 	var devices []Device
 	var discErr error
 	var air []AirPlay
+	var casts []CastDevice
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		devices, discErr = DiscoverRenderers(ctx, ip)
@@ -282,6 +283,10 @@ func runDiscover(argv []string) {
 	go func() {
 		defer wg.Done()
 		air = browseAirPlay(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		casts = browseCast(ctx)
 	}()
 	wg.Wait()
 	if discErr != nil {
@@ -294,7 +299,10 @@ func runDiscover(argv []string) {
 	if air == nil {
 		air = []AirPlay{}
 	}
-	Emit(os.Stdout, "devices", map[string]any{"devices": devices, "airplay": air})
+	if casts == nil {
+		casts = []CastDevice{}
+	}
+	Emit(os.Stdout, "devices", map[string]any{"devices": devices, "airplay": air, "cast": casts})
 }
 
 func runCtl(argv []string) {

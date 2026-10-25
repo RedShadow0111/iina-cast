@@ -21,7 +21,23 @@ func init() {
 	mime.AddExtensionType(".m3u8", "application/vnd.apple.mpegurl")
 	mime.AddExtensionType(".m4s", "video/iso.segment")
 	mime.AddExtensionType(".mp4", "video/mp4")
+	mime.AddExtensionType(".ts", "video/mp2t")
 	mime.AddExtensionType(".vtt", "text/vtt")
+}
+
+// withLANCORS lets the Default Media Receiver, which is a page hosted by
+// Google, fetch the playlist and segments from this Mac.
+func withLANCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // StartServer serves dir. master.m3u8 is rewritten on the way out
@@ -37,7 +53,7 @@ func StartServer(dir, subName, subLang string, bandwidth int) (int, func(), erro
 		return 0, nil, err
 	}
 	files := http.FileServer(http.Dir(dir))
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := withLANCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/master.m3u8" {
 			if b, rerr := os.ReadFile(filepath.Join(dir, "master.m3u8")); rerr == nil {
 				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -46,7 +62,7 @@ func StartServer(dir, subName, subLang string, bandwidth int) (int, func(), erro
 			}
 		}
 		files.ServeHTTP(w, r)
-	})
+	}))
 	srv := &http.Server{Handler: handler}
 	go srv.Serve(ln)
 	shutdown := func() {
@@ -82,20 +98,24 @@ func startMediaServer(mediaPath, mediaType, subPath string, stream *mediaStream,
 		return 0, nil, err
 	}
 	ln := pacedListener{raw}
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := withLANCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/media":
 			serveMedia(w, r, mediaPath, mediaType, stream, pace)
-		case "/sub.srt":
+		case "/sub.srt", "/sub.vtt":
 			if subPath == "" {
 				http.NotFound(w, r)
 				return
 			}
-			serveFile(w, r, subPath, "text/srt", nil)
+			ct := "text/srt"
+			if strings.HasSuffix(strings.ToLower(subPath), ".vtt") {
+				ct = "text/vtt"
+			}
+			serveFile(w, r, subPath, ct, nil)
 		default:
 			http.NotFound(w, r)
 		}
-	})
+	}))
 	srv := &http.Server{Handler: handler}
 	go srv.Serve(ln)
 	shutdown := func() {

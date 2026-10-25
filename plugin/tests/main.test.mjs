@@ -314,6 +314,25 @@ test("no receiver is an empty result", () => {
   assert.equal(chooseCast([], [{ model: "MacBookAir10,1" }]).mode, "none");
 });
 
+test("one Chromecast is chosen on its own", () => {
+  const c = chooseCast([], [{ name: "CustomCars", model: "AppleTV3,1" }], [
+    { name: "Спальня", model: "Chromecast", host: "192.168.0.50", port: 8009 },
+  ]);
+  assert.equal(c.mode, "cast");
+  assert.equal(c.device.name, "Спальня");
+  assert.equal(c.device.host, "192.168.0.50");
+});
+
+test("a Chromecast and a DLNA screen ask for a choice", () => {
+  const c = chooseCast([tv], [], [
+    { name: "Спальня", model: "Chromecast", host: "192.168.0.50", port: 8009 },
+  ]);
+  assert.equal(c.mode, "choose");
+  assert.equal(c.devices.length, 2);
+  assert.equal(c.devices[1].kind, "cast");
+  assert.equal(c.devices[1].name, "Спальня");
+});
+
 test("needsSelectedRemux only when the selected audio is not the file's first", () => {
   const first = selectTracks([
     { type: "video", selected: true, codec: "hevc", "ff-index": 0 },

@@ -161,7 +161,8 @@
     for (var i = 0; i < all.length; i++) if (all[i].name === d.name && all[i].kind === d.kind) same++;
     var name = same > 1 && d.host ? d.name + " (" + d.host + ")" : (d.name || d.host || "TV");
     if (d.kind === "airplay") return name + " (AirPlay)";
-    return name;
+    if (d.kind === "cast") return name + " (Chromecast)";
+    return name + " (DLNA)";
   }
 
   function renderDevices(s) {
@@ -184,6 +185,10 @@
         b.textContent = deviceLabel(dev, list);
         b.onclick = function () {
           if (dev.kind === "airplay") iina.postMessage("start", {});
+          else if (dev.kind === "cast") iina.postMessage("start", {
+            mode: "cast", host: dev.host || "", port: dev.port || 8009,
+            name: dev.name || "", model: dev.model || "",
+          });
           else iina.postMessage("start", { mode: "dlna", control: dev.control, name: dev.name || "" });
         };
         box.appendChild(b);
@@ -197,7 +202,7 @@
     // DLNA play, pause and seek are sent once from the plugin poll. Sending
     // them again from this page made every seek hit the TV twice, and a
     // large file rebuffered on both.
-    if (s.mode === "dlna") return;
+    if (s.mode === "dlna" || s.mode === "cast") return;
     if (!loadedURL) return;
     if (sync.seq > appliedSeq) {
       // seekTo carries its own seq so a later pause command doesn't replay a
@@ -252,7 +257,7 @@
     present(s);
     // A DLNA renderer pulls the file itself. Loading that URL into this
     // <video> would play it on the Mac and try to AirPlay it as well.
-    if (s.mode !== "dlna" && (s.phase === "ready" || s.phase === "packaged") && s.url && s.url !== loadedURL) {
+    if (s.mode !== "dlna" && s.mode !== "cast" && (s.phase === "ready" || s.phase === "packaged") && s.url && s.url !== loadedURL) {
       loadedURL = s.url;
       retried = false;
       // -1, not 0: the mirror's very first sync (seq 0) carries the cast's
@@ -298,22 +303,23 @@
             primary: "Send to TV", act: "cast", accent: true, off: false,
             secondary: null, sact: null };
     } else if (s.phase === "starting") {
-      var preparing = s.mode === "dlna";
+      var preparing = s.mode === "dlna" || s.mode === "cast";
       r = { dot: "busy", headline: preparing ? "Preparing the file" : "Packaging",
             sub: subs.label, warn: subs.warn, meter: true, pct: s.pct || 0, done: false,
             primary: preparing ? "Stop casting" : "Send to TV",
             act: preparing ? "stop" : "pick", accent: !preparing, off: !preparing,
             secondary: preparing ? null : "Cancel", sact: preparing ? null : "stop" };
-    } else if (onTV || (s.mode === "dlna" && s.tv)) {
-      var pos = s.mode === "dlna" ? (s.tv.pos || 0) : (v.currentTime || 0);
+    } else if (onTV || ((s.mode === "dlna" || s.mode === "cast") && s.tv)) {
+      var direct = s.mode === "dlna" || s.mode === "cast";
+      var pos = direct ? (s.tv.pos || 0) : (v.currentTime || 0);
       r = { dot: "live", headline: "Playing on TV",
-            sub: s.mode === "dlna" && s.dlnaName ? s.dlnaName : subs.label,
-            warn: subs.warn && s.mode !== "dlna", meter: true, done: false,
+            sub: direct && s.dlnaName ? s.dlnaName : subs.label,
+            warn: subs.warn && !direct, meter: true, done: false,
             pct: s.duration > 0 ? (pos / s.duration) * 100 : 0,
             primary: "Stop casting", act: "stop", accent: false, off: false,
-            secondary: s.mode === "dlna" ? null : "Send to another TV",
-            sact: s.mode === "dlna" ? null : "pick" };
-    } else if (s.mode === "dlna") {
+            secondary: direct ? null : "Send to another TV",
+            sact: direct ? null : "pick" };
+    } else if (s.mode === "dlna" || s.mode === "cast") {
       r = { dot: "busy", headline: "Sending to " + (s.dlnaName || "TV"),
             sub: subs.label, warn: subs.warn, meter: true,
             pct: s.pct || 0, done: false,
@@ -339,7 +345,7 @@
     fill.style.width = Math.max(0, Math.min(100, r.pct)) + "%";
     fill.className = r.done ? "done" : "";
     elapsedEl.textContent = onTV ? clock(v.currentTime || 0)
-                          : (s.mode === "dlna" && s.tv) ? clock(s.tv.pos || 0)
+                          : ((s.mode === "dlna" || s.mode === "cast") && s.tv) ? clock(s.tv.pos || 0)
                           : s.phase === "packaged" ? "Packaged"
                           : Math.round(s.pct || 0) + "%";
     totalEl.textContent = s.duration > 0 ? clock(s.duration) : "";
@@ -410,7 +416,7 @@
   iina.onMessage("state", render);
   setInterval(function () {
     iina.postMessage("getState", {});
-    if (pageState && pageState.mode === "dlna" && pageState.tv && casting) {
+    if (pageState && (pageState.mode === "dlna" || pageState.mode === "cast") && pageState.tv && casting) {
       iina.postMessage("tvState", {
         appliedSeq: appliedSeq,
         pos: pageState.tv.pos || 0,

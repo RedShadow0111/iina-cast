@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -62,6 +63,110 @@ func TestBuildArgsAudioCopy(t *testing.T) {
 		c := baseCfg()
 		c.ACodec = codec
 		argsHave(t, BuildArgs(c), "-c:a", "copy")
+	}
+}
+
+func TestBuildCastArgsCopiesHEVC(t *testing.T) {
+	c := baseCfg()
+	c.VCodec, c.ACodec, c.AChannels = "hevc", "ac3", 6
+	c.ForCast, c.CastModel, c.Width, c.Height = true, "Chromecast", 3840, 2076
+	c.StartAt = 90
+	c.CastLimit = 240
+	c.CastFile = "now.mp4"
+	args := BuildCastArgs(c)
+	argsHave(t, args, "-ss", "90.000", "-t", "240.000", "-i", "/movies/a.mkv", "-copyts")
+	argsHave(t, args, "-c:v", "copy", "-tag:v", "hvc1")
+	argsHave(t, args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
+	argsHave(t, args, "-map_chapters", "-1", "-map_metadata", "-1")
+	argsHave(t, args, "-movflags", "+faststart")
+	argsHave(t, args, "/tmp/out/now.mp4")
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "h264_videotoolbox") || strings.Contains(joined, "-vf") || strings.Contains(joined, "hls") || strings.Contains(joined, "-c:a copy") {
+		t.Fatal("HEVC for Chromecast must copy video and play AAC, not AC-3 or a re-encode")
+	}
+}
+
+func TestBuildCastArgsCopiesH264(t *testing.T) {
+	c := baseCfg()
+	c.VCodec, c.ACodec = "h264", "aac"
+	c.ForCast, c.CastModel, c.Width, c.Height = true, "Chromecast", 3840, 2160
+	args := BuildCastArgs(c)
+	argsHave(t, args, "-c:v", "copy")
+	argsHave(t, args, "-c:a", "copy")
+	argsHave(t, args, "-movflags", "+faststart")
+	argsHave(t, args, "/tmp/out/media.mp4")
+	joined := strings.Join(args, " ")
+	if slices.Contains(args, "h264_videotoolbox") || slices.Contains(args, "hvc1") || strings.Contains(joined, "-ss ") || strings.Contains(joined, "-copyts") {
+		t.Fatal("H.264 from the start must be copied, without seeking")
+	}
+}
+
+func TestWaitForCastMediaAtTheStartPlaysEarly(t *testing.T) {
+	stream := newMediaStream(100)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		stream.add(2, 1000)
+	}()
+	started := time.Now()
+	loadAt, consumed, err := waitForCastMedia(ctx, stream, 0, make(chan error), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed || loadAt != 0 {
+		t.Fatalf("consumed=%v loadAt=%v", consumed, loadAt)
+	}
+	if time.Since(started) < 100*time.Millisecond {
+		t.Fatal("returned before any media existed")
+	}
+}
+
+func TestWaitForCastMediaMidMovieWaitsForTheFile(t *testing.T) {
+	stream := newMediaStream(100)
+	stream.add(50, 1000)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		done <- nil
+	}()
+	started := time.Now()
+	loadAt, consumed, err := waitForCastMedia(ctx, stream, 40, done, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !consumed || loadAt != 40 {
+		t.Fatalf("consumed=%v loadAt=%v", consumed, loadAt)
+	}
+	if time.Since(started) < 200*time.Millisecond {
+		t.Fatal("a mid-movie start was handed over before the file finished")
+	}
+}
+
+func TestWaitForCastPlaylistNeedsASegment(t *testing.T) {
+	dir := t.TempDir()
+	index := filepath.Join(dir, "index.m3u8")
+	if err := os.WriteFile(index, []byte("#EXTM3U\n#EXT-X-VERSION:7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		_ = os.WriteFile(index, []byte("#EXTM3U\n#EXTINF:6.000,\nseg_0000.m4s\n"), 0o644)
+	}()
+	started := time.Now()
+	loadAt, err := waitForCastPlaylist(ctx, index, 0, func() bool { return true }, make(chan error), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadAt != 0 {
+		t.Fatalf("load position %v", loadAt)
+	}
+	if time.Since(started) < 300*time.Millisecond {
+		t.Fatal("an empty playlist was handed to the Chromecast")
 	}
 }
 

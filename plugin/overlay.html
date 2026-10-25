@@ -43,7 +43,8 @@
   function deviceLabel(d) {
     var name = d.name || d.host || "TV";
     if (d.kind === "airplay") return name + " (AirPlay)";
-    return name;
+    if (d.kind === "cast") return name + " (Chromecast)";
+    return name + " (DLNA)";
   }
   function renderDevices(list) {
     var box = document.getElementById("list");
@@ -68,6 +69,9 @@
             kind: dev.kind || "dlna",
             control: dev.control || "",
             name: dev.name || "",
+            host: dev.host || "",
+            port: dev.port || 0,
+            model: dev.model || "",
           });
         };
         box.appendChild(b);
@@ -93,7 +97,7 @@
       busy = true;
       title = mode === "dlna" ? "Копируем выбранные дорожки" : "Готовим поток";
     } else if (phase === "ready" || phase === "packaged") {
-      if (mode === "dlna") {
+      if (mode === "dlna" || mode === "cast") {
         text = s.tv ? "Стоп" : "Отправка…";
         busy = !s.tv;
         title = s.dlnaName || "Телевизор";
@@ -117,7 +121,7 @@
     }
     if (phase === "starting") return;
     if (phase === "ready" || phase === "packaged") {
-      if (mode === "dlna" && onTV) iina.postMessage("stop", {});
+      if ((mode === "dlna" || mode === "cast") && onTV) iina.postMessage("stop", {});
       return;
     }
     iina.postMessage("cast", {});

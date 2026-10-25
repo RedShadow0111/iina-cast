@@ -12,7 +12,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: airplay-helper serve|stop|dlna-discover|dlna-ctl ...")
+		fmt.Fprintln(os.Stderr, "usage: airplay-helper serve|stop|dlna-discover|dlna-ctl|cast-ctl ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -22,6 +22,8 @@ func main() {
 		runDiscover(os.Args[2:])
 	case "dlna-ctl":
 		runCtl(os.Args[2:])
+	case "cast-ctl":
+		runCastCtl(os.Args[2:])
 	case "stop":
 		fs := flag.NewFlagSet("stop", flag.ExitOnError)
 		out := fs.String("out", "", "output dir of the instance to stop")
@@ -70,7 +72,14 @@ func runServe(argv []string) {
 	var mode, dlnaControl, title string
 	var startAt float64
 	var startPaused bool
-	fs.StringVar(&mode, "mode", "airplay", "airplay (HLS) or dlna (single file the TV pulls)")
+	var castHost, castModel string
+	var castPort, vwidth, vheight int
+	fs.StringVar(&mode, "mode", "airplay", "airplay (HLS), dlna (single file the TV pulls) or cast (Chromecast)")
+	fs.StringVar(&castHost, "cast-host", "", "Chromecast IPv4 address for -mode cast")
+	fs.IntVar(&castPort, "cast-port", 8009, "Chromecast port")
+	fs.StringVar(&castModel, "cast-model", "", "Chromecast model (md=)")
+	fs.IntVar(&vwidth, "vwidth", 0, "video width in pixels")
+	fs.IntVar(&vheight, "vheight", 0, "video height in pixels")
 	fs.StringVar(&dlnaControl, "dlna", "", "AVTransport control URL for -mode dlna")
 	fs.StringVar(&title, "title", "", "title shown on the DLNA renderer")
 	fs.Float64Var(&startAt, "start", 0, "DLNA start position in seconds")
@@ -125,8 +134,14 @@ func runServe(argv []string) {
 	}
 	defer os.Remove(pidfile)
 
+	c.Width = vwidth
+	c.Height = vheight
 	if mode == "dlna" {
 		serveDLNA(c, parent, ipOverride, dlnaControl, title, startAt, startPaused, pidfile, func(fn func()) { stopJob = fn }, fail)
+		return
+	}
+	if mode == "cast" {
+		serveCast(c, parent, ipOverride, title, castHost, castModel, castPort, startAt, startPaused, pidfile, func(fn func()) { stopJob = fn }, fail)
 		return
 	}
 	if mode != "airplay" {

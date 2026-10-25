@@ -148,11 +148,11 @@ function isVideoAirPlay(device) {
   return !/^AppleTV[123],/.test(model);
 }
 
-// One real target casts immediately. Two or more — a DLNA renderer and a
-// modern Apple TV count as separate targets — wait for a tap. A receiver
+// One real target casts immediately. Two or more — a DLNA renderer, a
+// Chromecast and a modern Apple TV each count — wait for a tap. A receiver
 // that only pretends to be an Apple TV does not count, and every real
 // Apple TV shares one system picker, so they are a single choice.
-function chooseCast(dlna, airplay) {
+function chooseCast(dlna, airplay, cast) {
   var options = [];
   var renderers = dlna || [];
   for (var i = 0; i < renderers.length; i++) {
@@ -175,10 +175,27 @@ function chooseCast(dlna, airplay) {
     });
     break;
   }
+  var casts = cast || [];
+  for (var k = 0; k < casts.length; k++) {
+    var g = casts[k];
+    if (!g || !g.host) continue;
+    var port = g.port || 8009;
+    options.push({
+      kind: "cast",
+      name: g.name || "Chromecast",
+      host: g.host,
+      port: port,
+      model: g.model || "",
+      control: g.host + ":" + port,
+    });
+  }
   if (options.length === 1 && options[0].kind === "dlna") {
     return { mode: "dlna", device: options[0] };
   }
   if (options.length === 1 && options[0].kind === "airplay") return { mode: "airplay" };
+  if (options.length === 1 && options[0].kind === "cast") {
+    return { mode: "cast", device: options[0] };
+  }
   if (options.length > 1) return { mode: "choose", devices: options };
   return { mode: "none" };
 }
@@ -435,7 +452,7 @@ if (typeof iina !== "undefined") {
   // on the main thread, pauses both sides and rebuilds the stream.
   event.on("mpv.aid.changed", function () {
     if (suppressSync || mirror === null) return;
-    if (state.mode !== "dlna" && state.mode !== "airplay") return;
+    if (state.mode !== "dlna" && state.mode !== "airplay" && state.mode !== "cast") return;
     if (state.phase !== "starting" && state.phase !== "ready" && state.phase !== "packaged") return;
     var tracks = playerTracks();
     state.switchAudio = !!(tracks && tracks.amap !== state.amap);
@@ -548,6 +565,8 @@ if (typeof iina !== "undefined") {
   function startCast(opts) {
     opts = opts || {};
     var dlna = opts.mode === "dlna";
+    var casting = opts.mode === "cast";
+    var direct = dlna || casting;
     reapMirror(); // a helper-initiated teardown may have left a stale mirror
                   // un-reaped (only the getState poll normally does that); a
                   // restart must not let newMirror() capture that stale
@@ -555,6 +574,10 @@ if (typeof iina !== "undefined") {
     if (state.phase === "starting" || state.phase === "ready" || state.phase === "packaged") return;
     if (dlna && !opts.control) {
       refuse("no DLNA device selected");
+      return;
+    }
+    if (casting && !opts.host) {
+      refuse("no Chromecast selected");
       return;
     }
     var ready = localCastSource();
@@ -574,6 +597,8 @@ if (typeof iina !== "undefined") {
     // the serve args are built inside resolveBinDir's callback, which runs
     // from a utils.exec promise, and nothing IINA-facing is called from there.
     var lanIP = lanIPOverride(preferences.get("lanIP"));
+    var vwidth = mpv.getNumber("width") || 0;
+    var vheight = mpv.getNumber("height") || 0;
     tvSeenPlaying = false;
     tvWasPaused = false;
     localAlignUntil = 0;
@@ -588,7 +613,7 @@ if (typeof iina !== "undefined") {
     // that frame. A file the user had paused stays paused. AirPlay keeps
     // the muted mirror, so a pause taken during the search is released.
     var resumeTogether = false;
-    if (!dlna) {
+    if (!direct) {
       if (holdPlayback) {
         holdPlayback = false;
         mpv.set("pause", false);
@@ -605,14 +630,19 @@ if (typeof iina !== "undefined") {
     }
     var startPaused = opts.forcePlay ? false : !!mpv.getFlag("pause");
     var dlnaControl = dlna ? String(opts.control) : "";
-    var dlnaName = dlna ? String(opts.name || "") : "";
+    var dlnaName = direct ? String(opts.name || "") : "";
+    var castHost = casting ? String(opts.host || "") : "";
+    var castPort = casting ? (Number(opts.port) || 8009) : 0;
+    var castModel = casting ? String(opts.model || "") : "";
     var outDir = utils.resolvePath("@tmp/hls");
     var gen = ++castGen;
     stdoutRest = "";
     state = {
       phase: "starting", url: null, pct: 0, msg: null,
-      mode: dlna ? "dlna" : "airplay",
-      dlnaName: dlnaName, dlnaControl: dlnaControl, devices: [], tv: null,
+      mode: casting ? "cast" : (dlna ? "dlna" : "airplay"),
+      dlnaName: dlnaName, dlnaControl: dlnaControl,
+      castHost: castHost, castPort: castPort, castModel: castModel,
+      devices: [], tv: null,
       base: 0, amap: tracks.amap, forcePlay: !!opts.forcePlay,
       resumeTogether: resumeTogether, landed: false, joinUntil: 0,
       seenPos: startAt, seekPending: false, seekArmed: false, dlnaApplied: 0,
@@ -621,7 +651,7 @@ if (typeof iina !== "undefined") {
     // seeked to startAt. AirPlay keeps playing into the mirror.
     mirror = newMirror(startAt, !!mpv.getFlag("mute"), startPaused);
     mpv.set("mute", true);
-    if (dlna && dlnaName && !opts.quiet) core.osd("На телевизор: " + dlnaName);
+    if (direct && dlnaName && !opts.quiet) core.osd("На телевизор: " + dlnaName);
 
     resolveBinDir(function (binDir, resolveErr) {
       if (gen !== castGen) return; // superseded by a newer cast or a stop
@@ -654,6 +684,11 @@ if (typeof iina !== "undefined") {
         // the case it cannot see: an MP4 with several audio tracks, or a
         // subtitle, where serving the original file would ignore IINA.
         if (needsSelectedRemux(tracks)) serveArgs.push("-remux");
+      } else if (casting) {
+        serveArgs.push("-mode", "cast", "-cast-host", castHost, "-cast-port", String(castPort),
+          "-cast-model", castModel, "-title", fileTitle(src), "-start", String(startAt),
+          "-vwidth", String(vwidth), "-vheight", String(vheight));
+        if (startPaused) serveArgs.push("-paused");
       }
       utils.exec(helper, serveArgs, undefined, function (chunk) {
         if (gen !== castGen) return;
@@ -714,7 +749,7 @@ if (typeof iina !== "undefined") {
   // choice. The next getState poll (main thread) is what actually starts
   // the cast or opens the sidebar.
   function applyTargets(ev) {
-    var choice = chooseCast(ev.devices || [], ev.airplay || []);
+    var choice = chooseCast(ev.devices || [], ev.airplay || [], ev.cast || []);
     if (choice.mode === "dlna") {
       state.phase = "browsing";
       state.mode = "dlna";
@@ -728,6 +763,18 @@ if (typeof iina !== "undefined") {
       state.msg = null;
       state.pending = { mode: "airplay" };
       state.needPanel = true;
+    } else if (choice.mode === "cast") {
+      state.phase = "browsing";
+      state.mode = "cast";
+      state.devices = [];
+      state.msg = null;
+      state.pending = {
+        mode: "cast",
+        host: choice.device.host,
+        port: choice.device.port,
+        name: choice.device.name || "",
+        model: choice.device.model || "",
+      };
     } else if (choice.mode === "choose") {
       state.phase = "browsing";
       state.mode = "dlna";
@@ -796,6 +843,10 @@ if (typeof iina !== "undefined") {
   function pauseRendererNow(control) {
     resolveBinDir(function (binDir, resolveErr) {
       if (resolveErr) return;
+      if (state.mode === "cast") {
+        utils.exec(binDir + "/airplay-helper", ["cast-ctl", "-out", utils.resolvePath("@tmp/hls"), "-action", "pause"]);
+        return;
+      }
       utils.exec(binDir + "/airplay-helper", ["dlna-ctl", "-control", control, "-action", "pause"]);
     });
   }
@@ -807,13 +858,17 @@ if (typeof iina !== "undefined") {
     var mode = state.mode;
     var control = state.dlnaControl || "";
     var name = state.dlnaName || "";
-    if (mode !== "dlna" && mode !== "airplay") return;
+    var castHost = state.castHost || "";
+    var castPort = state.castPort || 8009;
+    var castModel = state.castModel || "";
+    if (mode !== "dlna" && mode !== "airplay" && mode !== "cast") return;
     if (state.phase !== "starting" && state.phase !== "ready" && state.phase !== "packaged") return;
     if (mode === "dlna" && !control) return;
+    if (mode === "cast" && !castHost) return;
     suppressSync = true;
     mpv.set("pause", true);
     mpv.set("time-pos", pos);
-    if (mode === "dlna") {
+    if (mode === "dlna" || mode === "cast") {
       try { file.write("@tmp/hls/hold", "1"); } catch (e) {}
       // Only the "stay paused" path sends Pause itself. A seek that should
       // keep playing must not have a late Pause land on the new file.
@@ -825,6 +880,7 @@ if (typeof iina !== "undefined") {
     state = { phase: "idle", url: null, pct: 0, msg: null };
     var next = { forcePlay: !stayPaused, quiet: true };
     if (mode === "dlna") startCast({ mode: "dlna", control: control, name: name, forcePlay: next.forcePlay, quiet: true, startAt: pos });
+    else if (mode === "cast") startCast({ mode: "cast", host: castHost, port: castPort, model: castModel, name: name, forcePlay: next.forcePlay, quiet: true, startAt: pos });
     else startCast(next);
     if (mirror) mirror.lastSetPos = { pos: pos, at: Date.now() };
     suppressSync = false;
@@ -833,7 +889,7 @@ if (typeof iina !== "undefined") {
   // A backwards seek recopy leaves mpv paused. Unpause it on the main
   // thread once the TV is playing, so the clocks start at the same frame.
   function resumeIfReady() {
-    if (!state.forcePlay || state.mode !== "dlna" || !state.tv || state.tv.paused) return;
+    if (!state.forcePlay || (state.mode !== "dlna" && state.mode !== "cast") || !state.tv || state.tv.paused) return;
     if (state.phase !== "ready" && state.phase !== "packaged") return;
     state.forcePlay = false;
     mpv.set("pause", false);
@@ -857,7 +913,7 @@ if (typeof iina !== "undefined") {
   // the player in the same turn as the SOAP call is why it ran for a second
   // before the television did.
   function resumeTogetherIfLanded() {
-    if (!state.resumeTogether || !state.landed || mirror === null || state.mode !== "dlna") return;
+    if (!state.resumeTogether || !state.landed || mirror === null || (state.mode !== "dlna" && state.mode !== "cast")) return;
     if (state.phase !== "ready" && state.phase !== "packaged") return;
     if (state.landedOK === false) {
       state.resumeTogether = false;
@@ -939,7 +995,7 @@ if (typeof iina !== "undefined") {
 
   // Returns true when the cast was torn down (the TV finished).
   function syncClock() {
-    if (mirror === null || state.mode !== "dlna" || !state.tv) return false;
+    if (mirror === null || (state.mode !== "dlna" && state.mode !== "cast") || !state.tv) return false;
     if (state.tv.ended) {
       // Fall through: ending the movie still tears the cast down.
     } else if (state.joinUntil && Date.now() < state.joinUntil && state.tv.paused && !mirror.paused) {
@@ -980,7 +1036,7 @@ if (typeof iina !== "undefined") {
   }
 
   function alignMpvToTV() {
-    if (mirror === null || state.mode !== "dlna" || !state.tv || state.tv.ended) return true;
+    if (mirror === null || (state.mode !== "dlna" && state.mode !== "cast") || !state.tv || state.tv.ended) return true;
     if (state.tv.paused) return false;
     if (mirror.seekTo) return true;
     if (mirror.holdUntil && Date.now() < mirror.holdUntil) return true;
@@ -1006,7 +1062,8 @@ if (typeof iina !== "undefined") {
   // One SOAP for the latest seek or pause. Runs from the poll, so it still
   // happens when the sidebar page is not the thing driving the TV.
   function pushPlayback() {
-    if (mirror === null || state.mode !== "dlna" || !state.dlnaControl) return;
+    if (mirror === null || (state.mode !== "dlna" && state.mode !== "cast")) return;
+    if (state.mode === "dlna" && !state.dlnaControl) return;
     var applied = state.dlnaApplied || 0;
     if (mirror.seq <= applied) return;
     if (mirror.seekTo && mirror.seekTo.seq > applied) {
@@ -1053,6 +1110,7 @@ if (typeof iina !== "undefined") {
     if (!job) return;
     state.pending = null;
     if (job.mode === "dlna") startCast({ mode: "dlna", control: job.control, name: job.name || "" });
+    else if (job.mode === "cast") startCast({ mode: "cast", host: job.host, port: job.port, name: job.name || "", model: job.model || "" });
     else startCast();
   }
 
@@ -1063,6 +1121,7 @@ if (typeof iina !== "undefined") {
 
   function stopCast() {
     var control = (state.mode === "dlna" && state.dlnaControl) ? state.dlnaControl : "";
+    var castOn = state.mode === "cast";
     var resumeLocal = holdPlayback || !!state.resumeTogether;
     holdPlayback = false;
     haveHeldPos = false;
@@ -1079,6 +1138,9 @@ if (typeof iina !== "undefined") {
       if (control) {
         utils.exec(binDir + "/airplay-helper", ["dlna-ctl", "-control", control, "-action", "stop"]);
       }
+      if (castOn) {
+        utils.exec(binDir + "/airplay-helper", ["cast-ctl", "-out", utils.resolvePath("@tmp/hls"), "-action", "stop"]);
+      }
       utils.exec(binDir + "/airplay-helper", ["stop", "-out", utils.resolvePath("@tmp/hls")]);
     });
     state = { phase: "idle", url: null, pct: 0, msg: null };
@@ -1090,8 +1152,18 @@ if (typeof iina !== "undefined") {
   // stall on both screens. The time sent is IINA's time, not a position
   // inside a clipped copy.
   function dispatchDlna(action, pos) {
-    if (state.mode !== "dlna" || !state.dlnaControl) return false;
     if (action !== "play" && action !== "pause" && action !== "seek" && action !== "stop") return false;
+    if (state.mode === "cast") {
+      if (action === "seek") pos = Math.max(0, typeof pos === "number" ? pos : 0);
+      resolveBinDir(function (binDir, resolveErr) {
+        if (resolveErr) { console.log("[cast] " + resolveErr); return; }
+        var args = ["cast-ctl", "-out", utils.resolvePath("@tmp/hls"), "-action", action];
+        if (action === "seek") args.push("-pos", String(pos || 0));
+        utils.exec(binDir + "/airplay-helper", args);
+      });
+      return false;
+    }
+    if (state.mode !== "dlna" || !state.dlnaControl) return false;
     var control = state.dlnaControl;
     if (action === "seek") pos = Math.max(0, typeof pos === "number" ? pos : 0);
     resolveBinDir(function (binDir, resolveErr) {
@@ -1183,7 +1255,7 @@ if (typeof iina !== "undefined") {
       // DLNA drift is not pulled into the local file from this poll. Doing
       // so reopens a large movie and the TV shows the download meter. The
       // resume path in syncClock is the one that puts the clocks back together.
-      if (r.setMpvPos !== null && state.mode !== "dlna") mpv.set("time-pos", r.setMpvPos);
+      if (r.setMpvPos !== null && state.mode !== "dlna" && state.mode !== "cast") mpv.set("time-pos", r.setMpvPos);
     });
     sidebarLoaded = true;
   }
@@ -1233,6 +1305,8 @@ if (typeof iina !== "undefined") {
       if (d.kind === "airplay") {
         openSidebar();
         startCast();
+      } else if (d.kind === "cast") {
+        startCast({ mode: "cast", host: d.host || "", port: d.port || 8009, name: d.name || "", model: d.model || "" });
       } else if (d.control) {
         startCast({ mode: "dlna", control: d.control, name: d.name || "" });
       }

@@ -4,7 +4,7 @@ This is a fork of [ozykhan/iina-airplay](https://github.com/ozykhan/iina-airplay
 
 **Send what IINA is playing to a television.** No screen mirroring — the plugin
 hands the file to the TV, and IINA stays the remote. A real Apple TV uses
-AirPlay. Other televisions use DLNA.
+AirPlay, a Chromecast uses Google Cast, and other televisions use DLNA.
 
 <img src="https://github.com/user-attachments/assets/57781b27-13fe-4c9a-a96c-7818986025c0" width="800" height="365" alt="The iina-airplay sidebar casting to an Apple TV">
 
@@ -14,7 +14,7 @@ AirPlay. Other televisions use DLNA.
 IINA → Settings → Plugins → Install → RedShadow0111/iina-cast
 ```
 
-macOS 12+ · Apple TV or a DLNA television · MIT · everything bundled, nothing downloads at runtime
+macOS 12+ · Apple TV, Chromecast, or a DLNA television · MIT · everything bundled, nothing downloads at runtime
 
 - **The picture is the file.** Remux-first, so in the normal case the TV plays the
   original bitstream bit-for-bit. Only unusual codecs get re-encoded, through VideoToolbox.
@@ -31,7 +31,8 @@ macOS 12+ · Apple TV or a DLNA television · MIT · everything bundled, nothing
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Image subtitles | PGS/VOBSUB are dropped with a notice rather than burned in. SRT/ASS work                                                                                            |
 | Start position  | The TV starts from the beginning, then jumps to where IINA was once packaging has reached that point. Best-effort: if the TV ends up elsewhere, IINA follows the TV |
-| Disk space      | A cast writes a second copy of the file (the HLS remux) to IINA's temp directory for as long as it runs; it is deleted when the cast stops or IINA quits            |
+| Chromecast audio | The picture is copied. Sound is AAC, so the Chromecast can play it; AC-3 and other codecs are converted |
+| Disk space      | A cast writes a second copy of the file to IINA's temp directory for as long as it runs; it is deleted when the cast stops or IINA quits                              |
 
 <details>
 <summary><b>Why this is a handoff and not a mirror</b></summary>

@@ -32,10 +32,15 @@ type JobConfig struct {
 	SubLang  string
 	SubName  string
 	Duration float64
-	// StartAt is accepted and ignored. Cutting the head off the file made
-	// the TV's clock start at zero, so a seek to 56:23 was delivered as the
-	// position inside that tail (35:06). The file keeps the movie's timeline.
-	StartAt float64
+	// StartAt is where the movie is when the cast begins. The DLNA remux
+	// still copies from the beginning, so the television's clock matches
+	// the file. The Chromecast remux seeks the input to this time and keeps
+	// the original timestamps (-copyts), so the receiver's currentTime is
+	// the movie time. CastLimit is how many seconds to read after that;
+	// zero reads through the end. CastFile is the name written in OutDir.
+	StartAt   float64
+	CastLimit float64
+	CastFile  string
 	// OnProgress receives ffmpeg's output clock, in seconds, as the remux
 	// grows. The server turns that into a time-to-byte index. It may block:
 	// while it blocks, the progress pipe fills and, together with Throttle,
@@ -48,6 +53,14 @@ type JobConfig struct {
 	// such as Xiaomi pull one URL; they do not play the fMP4 HLS playlist
 	// the AirPlay path serves.
 	ForDLNA bool
+	// ForCast packages HLS the Default Media Receiver can open. H.264 and
+	// HEVC are copied. CastModel, Width and Height are recorded for the
+	// receiver; only a video codec that cannot be copied is scaled to
+	// H.264 1080p.
+	ForCast   bool
+	CastModel string
+	Width     int
+	Height    int
 	// ForceRemux refuses to hand the original file over. Set when IINA
 	// selected an audio track other than the file's first. SubFile is a
 	// prepared .srt the server hands out beside the video; it is not muxed.
@@ -180,6 +193,77 @@ func BuildDLNAArgs(c JobConfig) []string {
 	)
 }
 
+// castScale caps a re-encode at 1080p without stretching. The filter is a
+// no-op for a picture that is already smaller.
+const castScale = "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+
+// BuildCastArgs writes one faststart MP4 the Default Media Receiver can
+// open at once. Video is copied. Audio is AAC: this receiver played the
+// picture and reported no audio track for the file's AC-3, in a
+// fragmented MP4 and in a progressive one it still had to scan from the
+// end. A faststart file puts the index at the front, so playback starts
+// after the first few seconds of the remux instead of after the whole
+// movie. Subtitles stay a sidecar.
+func BuildCastArgs(c JobConfig) []string {
+	recipe := planCast(c.VCodec, c.CastModel, c.Width, c.Height)
+	args := []string{
+		"-hide_banner", "-nostats", "-loglevel", "warning", "-y",
+		"-progress", "pipe:1",
+	}
+	// Input options. -t after -i is measured against the copied timestamps
+	// and writes an empty file; before -i it is a length to read.
+	if c.StartAt > 0.5 {
+		args = append(args, "-ss", strconv.FormatFloat(c.StartAt, 'f', 3, 64))
+	}
+	if c.CastLimit > 0 {
+		args = append(args, "-t", strconv.FormatFloat(c.CastLimit, 'f', 3, 64))
+	}
+	args = append(args, "-i", c.Source)
+	if c.StartAt > 0.5 {
+		args = append(args, "-copyts")
+	}
+	args = append(args,
+		"-map", "0:"+strconv.Itoa(c.VMap),
+		"-map", "0:"+strconv.Itoa(c.AMap),
+		"-map_chapters", "-1",
+		"-map_metadata", "-1",
+		"-sn", "-dn",
+	)
+	if recipe.Scale {
+		args = append(args, "-vf", castScale)
+	}
+	switch {
+	case recipe.CopyVideo && recipe.HEVCOut:
+		args = append(args, "-c:v", "copy", "-tag:v", "hvc1")
+	case recipe.CopyVideo:
+		args = append(args, "-c:v", "copy")
+	default:
+		args = append(args,
+			"-c:v", "h264_videotoolbox",
+			"-profile:v", "high", "-level:v", "4.2",
+			"-b:v", "10M", "-allow_sw", "1", "-pix_fmt", "yuv420p",
+			"-force_key_frames", "expr:gte(t,n_forced*2)",
+		)
+	}
+	if c.ACodec == "aac" {
+		args = append(args, "-c:a", "copy")
+	} else if c.AChannels > 2 {
+		// The receiver stays silent on AC-3. Stereo AAC is what it plays.
+		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
+	} else {
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
+	}
+	name := c.CastFile
+	if name == "" {
+		name = "media.mp4"
+	}
+	return append(args,
+		"-movflags", "+faststart",
+		"-f", "mp4",
+		filepath.Join(c.OutDir, name),
+	)
+}
+
 // procThrottle pauses ffmpeg while the remux is too far ahead of the client
 // and continues it once the television has caught up. SIGSTOP is immediate:
 // blocking the progress pipe alone lets ffmpeg write for minutes before the
@@ -255,7 +339,10 @@ func ProgressPct(outTimeUS int64, duration float64) float64 {
 func RunJob(c JobConfig, out io.Writer) (func(), <-chan error) {
 	done := make(chan error, 1)
 	args := BuildArgs(c)
-	if c.ForDLNA {
+	switch {
+	case c.ForCast:
+		args = BuildCastArgs(c)
+	case c.ForDLNA:
 		args = BuildDLNAArgs(c)
 	}
 	cmd := exec.Command(c.FFmpeg, args...)
