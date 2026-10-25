@@ -149,8 +149,18 @@ test("a user seek holds mpv until the TV clock arrives", () => {
 
 test("drift correction resumes after the seek hold expires", () => {
   const m = mirrorOnMpvSeek(newMirror(0, false, false), 300, 1000);
-  const r = mirrorOnTvState(m, tv({ appliedSeq: 1, pos: 10 }), 300, false, 1000 + SEEK_HOLD_MS + 1);
-  assert.equal(r.setMpvPos, 10);
+  const r = mirrorOnTvState(m, tv({ appliedSeq: 1, pos: 296 }), 300, false, 1000 + SEEK_HOLD_MS + 1);
+  assert.equal(r.setMpvPos, 296);
+});
+
+test("a gap of many minutes does not seek the local file", () => {
+  const r = mirrorOnTvState(newMirror(0, false, false), tv({ pos: 2106 }), 3383, false, 0);
+  assert.equal(r.setMpvPos, null);
+});
+
+test("a pause does not seek the local file", () => {
+  const r = mirrorOnTvState(newMirror(0, false, true), tv({ paused: true, pos: 10 }), 50, true, 0);
+  assert.equal(r.setMpvPos, null);
 });
 
 test("drift within tolerance is left alone", () => {

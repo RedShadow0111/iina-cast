@@ -214,6 +214,5 @@ test("DLNA playback reports the TV clock and forwards a seek", () => {
   });
   assert.equal(p.els.headline.textContent, "Playing on TV");
   assert.equal(p.els.elapsed.textContent, "0:12");
-  assert.deepEqual(JSON.parse(JSON.stringify(p.posted.filter(([n]) => n === "dlnaCtl"))),
-    [["dlnaCtl", { action: "seek", pos: 40 }]]);
+  assert.deepEqual(p.posted.filter(([n]) => n === "dlnaCtl"), []);
 });

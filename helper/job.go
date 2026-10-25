@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -30,18 +32,25 @@ type JobConfig struct {
 	SubLang  string
 	SubName  string
 	Duration float64
-	// StartAt drops the head of a DLNA remux with an input seek, so a track
-	// change or a backwards seek only copies the tail. The output timeline
-	// starts at zero; the server adds StartAt back onto the TV clock.
+	// StartAt is accepted and ignored. Cutting the head off the file made
+	// the TV's clock start at zero, so a seek to 56:23 was delivered as the
+	// position inside that tail (35:06). The file keeps the movie's timeline.
 	StartAt float64
+	// OnProgress receives ffmpeg's output clock, in seconds, as the remux
+	// grows. The server turns that into a time-to-byte index. It may block:
+	// while it blocks, the progress pipe fills and, together with Throttle,
+	// the copy waits until the television has caught up.
+	OnProgress func(outSec float64)
+	// Throttle pauses the ffmpeg process while the copy is too far ahead of
+	// the bytes already handed to the television. Nil for the AirPlay path.
+	Throttle *procThrottle
 	// ForDLNA selects the single-file MPEG-TS recipe. DLNA renderers on TVs
 	// such as Xiaomi pull one URL; they do not play the fMP4 HLS playlist
 	// the AirPlay path serves.
 	ForDLNA bool
-	// ForceRemux refuses to hand the original file over. Set when the file
-	// has more than one audio track, so the TV would not play the one IINA
-	// has selected. SubFile is a prepared .srt the server hands out beside
-	// the video; it is not muxed into the MPEG-TS.
+	// ForceRemux refuses to hand the original file over. Set when IINA
+	// selected an audio track other than the file's first. SubFile is a
+	// prepared .srt the server hands out beside the video; it is not muxed.
 	ForceRemux bool
 	SubFile    string
 }
@@ -126,23 +135,28 @@ func BuildArgs(c JobConfig) []string {
 // Subtitles stay a sidecar (/sub.srt in the DIDL). MPEG-TS has no mov_text,
 // and muxing them would not make the copy any faster.
 //
-// StartAt places -ss before -i. The copy then begins at the previous
-// keyframe instead of reading the whole file, and the output clock starts
-// at zero. The caller reports TV time as StartAt plus the renderer's clock.
+// The copy always starts at the beginning of the movie. An input seek would
+// open faster, and it is exactly what made the television show a different
+// time from IINA.
+//
+// -readrate caps the disk read at 4× playback after a 15-second burst, so a
+// seek cannot flatten the disk. The steady pace is not this flag: the helper
+// pauses ffmpeg once the file is about a minute ahead of what the TV has
+// actually been sent, and the HTTP server then feeds the TV at just over
+// realtime. An uncapped copy reads the whole movie at once, the playhead
+// falls out of the disk cache, and a few minutes in both pictures hitch.
 func BuildDLNAArgs(c JobConfig) []string {
 	args := []string{
 		"-hide_banner", "-nostats", "-loglevel", "warning", "-y",
+		"-flush_packets", "1",
 		"-progress", "pipe:1",
-	}
-	if c.StartAt >= 0.5 {
-		args = append(args, "-ss", strconv.FormatFloat(c.StartAt, 'f', 3, 64))
-	}
-	args = append(args,
+		"-readrate", "4",
+		"-readrate_initial_burst", "15",
 		"-i", c.Source,
-		"-map", "0:"+strconv.Itoa(c.VMap),
-		"-map", "0:"+strconv.Itoa(c.AMap),
+		"-map", "0:" + strconv.Itoa(c.VMap),
+		"-map", "0:" + strconv.Itoa(c.AMap),
 		"-sn", "-dn",
-	)
+	}
 	switch c.VCodec {
 	case "h264", "hevc":
 		args = append(args, "-c:v", "copy")
@@ -159,15 +173,61 @@ func BuildDLNAArgs(c JobConfig) []string {
 			args = append(args, "-c:a", "aac", "-b:a", "256k")
 		}
 	}
-	if c.StartAt >= 0.5 {
-		// An input seek on a stream copy can leave a negative first PTS.
-		// The TV's clock is that PTS, so pin the tail to zero.
-		args = append(args, "-avoid_negative_ts", "make_zero")
-	}
 	return append(args,
+		"-muxdelay", "0", "-muxpreload", "0",
 		"-f", "mpegts",
 		filepath.Join(c.OutDir, "media.ts"),
 	)
+}
+
+// procThrottle pauses ffmpeg while the remux is too far ahead of the client
+// and continues it once the television has caught up. SIGSTOP is immediate:
+// blocking the progress pipe alone lets ffmpeg write for minutes before the
+// pipe fills.
+type procThrottle struct {
+	mu     sync.Mutex
+	pause  func()
+	resume func()
+}
+
+func (t *procThrottle) bind(pause, resume func()) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.pause = pause
+	t.resume = resume
+	t.mu.Unlock()
+}
+
+// hold stops ffmpeg while stay reports that the file is still ahead, and
+// continues it before returning. finished and a cancelled ctx both release it.
+func (t *procThrottle) hold(stay func() bool, finished func() bool, ctx context.Context) {
+	if t == nil || stay == nil || !stay() {
+		return
+	}
+	t.mu.Lock()
+	pause, resume := t.pause, t.resume
+	t.mu.Unlock()
+	if pause != nil {
+		pause()
+	}
+	defer func() {
+		if resume != nil {
+			resume()
+		}
+	}()
+	for stay() && (finished == nil || !finished()) {
+		if ctx == nil {
+			time.Sleep(150 * time.Millisecond)
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
 }
 
 func ParseProgressValue(line string) (string, string, bool) {
@@ -215,6 +275,26 @@ func RunJob(c JobConfig, out io.Writer) (func(), <-chan error) {
 
 	// Flag to track when job has completed (0 = running, 1 = done)
 	var jobDone atomic.Int32
+	var paused atomic.Bool
+	pauseProc := func() {
+		if cmd.Process == nil || jobDone.Load() != 0 {
+			return
+		}
+		if paused.CompareAndSwap(false, true) {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGSTOP)
+		}
+	}
+	resumeProc := func() {
+		if cmd.Process == nil {
+			return
+		}
+		if paused.CompareAndSwap(true, false) {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGCONT)
+		}
+	}
+	if c.Throttle != nil {
+		c.Throttle.bind(pauseProc, resumeProc)
+	}
 	// Closed once ffmpeg has exited and its result is on done, so stop can
 	// block until the process is really gone.
 	finished := make(chan struct{})
@@ -229,13 +309,10 @@ func RunJob(c JobConfig, out io.Writer) (func(), <-chan error) {
 			switch k {
 			case "out_time_us":
 				if us, perr := strconv.ParseInt(v, 10, 64); perr == nil {
-					dur := c.Duration
-					// -ss before -i resets the output clock, so the bar is
-					// the tail still being copied, not the whole movie.
-					if c.ForDLNA && c.StartAt >= 0.5 && c.Duration > c.StartAt {
-						dur = c.Duration - c.StartAt
+					Emit(out, "progress", map[string]any{"pct": ProgressPct(us, c.Duration)})
+					if c.OnProgress != nil {
+						c.OnProgress(float64(us) / 1e6)
 					}
-					Emit(out, "progress", map[string]any{"pct": ProgressPct(us, dur)})
 				}
 			case "progress":
 				if v == "end" {
@@ -262,6 +339,8 @@ func RunJob(c JobConfig, out io.Writer) (func(), <-chan error) {
 	// 3s the `stop` subcommand's TakeOver waits for the old instance.
 	// Safe to call more than once and after done has fired.
 	stop := func() {
+		// A stopped process does not handle SIGTERM until it is continued.
+		resumeProc()
 		// Only signal if job is still running
 		if jobDone.Load() == 0 {
 			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)

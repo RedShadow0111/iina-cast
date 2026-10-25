@@ -84,29 +84,20 @@ func TestBuildDLNAArgsCopiesIntoOneMPEGTS(t *testing.T) {
 	}
 }
 
-func TestBuildDLNAArgsCopiesTheTailFromTheInputSeek(t *testing.T) {
+func TestBuildDLNAArgsKeepsTheMovieTimeline(t *testing.T) {
 	c := baseCfg()
 	c.VCodec, c.ACodec = "h264", "aac"
 	c.StartAt = 90
 	args := BuildDLNAArgs(c)
-	ss, in := -1, -1
-	for i, a := range args {
-		if a == "-ss" && ss < 0 {
-			ss = i
-		}
-		if a == "-i" && in < 0 {
-			in = i
-		}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "-ss ") || strings.Contains(joined, "avoid_negative_ts") {
+		t.Fatal("clipping the file makes the TV clock disagree with IINA")
 	}
-	if ss < 0 || in < 0 || ss > in {
-		t.Fatalf("-ss must come before -i, got %v", args)
-	}
-	if args[ss+1] != "90.000" {
-		t.Fatalf("seek target: %v", args)
-	}
-	argsHave(t, args, "-avoid_negative_ts", "make_zero")
+	argsHave(t, args, "-flush_packets", "1")
+	argsHave(t, args, "-readrate", "4")
+	argsHave(t, args, "-readrate_initial_burst", "15")
+	argsHave(t, args, "-muxdelay", "0")
 	argsHave(t, args, "-c:v", "copy")
-	argsHave(t, args, "-c:a", "copy")
 }
 
 func TestBuildDLNAArgsLeavesSubtitlesToTheSidecar(t *testing.T) {

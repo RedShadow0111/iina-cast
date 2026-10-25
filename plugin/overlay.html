@@ -123,6 +123,6 @@
     iina.postMessage("cast", {});
   };
   iina.onMessage("state", show);
-  setInterval(function () { iina.postMessage("getState", {}); }, 500);
+  setInterval(function () { iina.postMessage("getState", {}); }, 250);
   iina.postMessage("getState", {});
 </script>

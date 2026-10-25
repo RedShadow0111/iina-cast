@@ -194,19 +194,10 @@
   function applySync(s) {
     var sync = s && s.sync;
     if (!sync) return;
-    if (s.mode === "dlna") {
-      if (!s.tv || sync.seq <= appliedSeq) return;
-      if (sync.seekTo && sync.seekTo.seq > appliedSeq) {
-        iina.postMessage("dlnaCtl", { action: "seek", pos: sync.seekTo.pos });
-      }
-      // A seek while already playing must not also send Play: some renderers
-      // restart the file. Pause is sent only when it actually changed.
-      if (!!sync.paused !== !!s.tv.paused) {
-        iina.postMessage("dlnaCtl", { action: sync.paused ? "pause" : "play" });
-      }
-      appliedSeq = sync.seq;
-      return;
-    }
+    // DLNA play, pause and seek are sent once from the plugin poll. Sending
+    // them again from this page made every seek hit the TV twice, and a
+    // large file rebuffered on both.
+    if (s.mode === "dlna") return;
     if (!loadedURL) return;
     if (sync.seq > appliedSeq) {
       // seekTo carries its own seq so a later pause command doesn't replay a
@@ -436,6 +427,6 @@
         ended: ended,
       });
     }
-  }, 500);
+  }, 250);
   iina.postMessage("getState", {});
 </script>

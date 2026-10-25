@@ -11,7 +11,7 @@
 // burn-in re-encode — out of scope, see docs/superpowers/specs/.
 var TEXT_SUB_CODECS = { subrip: 1, srt: 1, ass: 1, ssa: 1, mov_text: 1, webvtt: 1, text: 1 };
 
-function selectTracks(trackList) {
+function selectTracks(trackList, subsOn) {
   var video = null, audio = null, firstAudio = null, sub = null;
   for (var i = 0; i < trackList.length; i++) {
     var t = trackList[i];
@@ -20,7 +20,10 @@ function selectTracks(trackList) {
       if (firstAudio === null) firstAudio = t;
       if (t.selected) audio = t;
     }
-    if (t.type === "sub" && t.selected) sub = t;
+    // IINA's subtitle button hides the track with sub-visibility and leaves
+    // it selected. A selected "ru" track is not on unless that flag says so.
+    // Omitting the flag (tests, older callers) keeps the selected track.
+    if (t.type === "sub" && t.selected && subsOn !== false) sub = t;
   }
   if (!video) return null;
   if (!audio) audio = firstAudio;
@@ -35,6 +38,7 @@ function selectTracks(trackList) {
     achannels: audio["demux-channel-count"] || 2,
     vmap: video["ff-index"],
     amap: audio["ff-index"],
+    firstAmap: firstAudio["ff-index"],
     audioCount: audioCount,
     sub: null,
     subDropped: false,
@@ -179,14 +183,13 @@ function chooseCast(dlna, airplay) {
   return { mode: "none" };
 }
 
-// Handing the TV the original file lets it pick its own audio and subtitles.
-// Stream-copy a new file when IINA's selection would be lost: more than one
-// audio track, or a subtitle the user actually turned on. Codecs that copy
-// stay copied — this is not a quality preset.
+// The renderer plays the file's first audio track and seeks that file by its
+// own index. Remux only when IINA has selected a later audio track, which the
+// file would not play by itself. Subtitles are a sidecar, and a hidden
+// subtitle is not a reason to copy a large file.
 function needsSelectedRemux(tracks) {
   if (!tracks) return false;
-  if (tracks.sub || tracks.subDropped) return true;
-  return (tracks.audioCount || 0) > 1;
+  return tracks.amap !== tracks.firstAmap;
 }
 
 // WebKit reports a stream it couldn't fetch at all (refused, unreachable,
@@ -220,6 +223,7 @@ function describeMediaFailure(url, code, probe) {
 // node tests can drive every branch.
 
 var DRIFT_TOLERANCE = 1.5; // seconds of mpv/TV divergence tolerated before correcting
+var CLOCK_SEEK_LIMIT = 8; // larger gaps are a bad timeline, not drift: seeking the local file stalls it
 var ECHO_WINDOW_MS = 2000; // how long our own time-pos set may echo back as an mpv seek event
 var SEEK_HOLD_MS = 8000;   // how long a user seek is protected from a stale TV clock
 
@@ -301,7 +305,12 @@ function mirrorOnTvState(m, tvState, mpvPos, mpvPaused, now) {
     if (Math.abs(tvState.pos - n.holdPos) <= DRIFT_TOLERANCE) n.holdUntil = 0;
     else return out;
   }
-  if (Math.abs(mpvPos - tvState.pos) > DRIFT_TOLERANCE) {
+  // While either side is paused, moving time-pos makes IINA reopen a large
+  // file and flash its cache-speed meter, and the TV rebuffers with it.
+  // A gap of many minutes is the same failure: the TV clock and the movie
+  // clock diverged, and pulling the local file across that gap stalls both.
+  var gap = Math.abs(mpvPos - tvState.pos);
+  if (!mpvPaused && !tvState.paused && gap > DRIFT_TOLERANCE && gap <= CLOCK_SEEK_LIMIT) {
     out.setMpvPos = tvState.pos;
     n.lastSetPos = { pos: tvState.pos, at: now };
   }
@@ -330,6 +339,7 @@ if (typeof module !== "undefined") {
     DRIFT_TOLERANCE: DRIFT_TOLERANCE,
     ECHO_WINDOW_MS: ECHO_WINDOW_MS,
     SEEK_HOLD_MS: SEEK_HOLD_MS,
+    CLOCK_SEEK_LIMIT: CLOCK_SEEK_LIMIT,
   };
 }
 
@@ -357,6 +367,20 @@ if (typeof iina !== "undefined") {
   // Set while a track change or a backwards seek is moving mpv itself, so
   // the pause and seek those sets emit are not sent back to the TV.
   var suppressSync = false;
+  // The file was playing when the user sent it. It stays paused through the
+  // network search; startCast turns this into state.resumeTogether for DLNA
+  // and lets an AirPlay cast continue.
+  var holdPlayback = false;
+  // time-pos captured before the pause. Reading it afterwards often returns
+  // 0, and the TV then opens the movie at the beginning.
+  var haveHeldPos = false;
+  var heldPos = 0;
+  // DLNA resume alignment. The first time the TV reports that it is playing
+  // belongs to the opening join. A later pause-to-play is the user: the
+  // player is put back on the TV's clock then, including after a stall.
+  var tvSeenPlaying = false;
+  var tvWasPaused = false;
+  var localAlignUntil = 0;
 
   // Every post to the page goes through this so the page always sees the live
   // sync block alongside the pipeline state.
@@ -375,7 +399,7 @@ if (typeof iina !== "undefined") {
       dlnaName: state.dlnaName || "",
       tv: state.tv || null,
       duration: mpv.getNumber("duration") || 0,
-      subs: subtitleLabel(selectTracks(mpv.getNative("track-list") || [])),
+      subs: subtitleLabel(playerTracks()),
       sync: mirror === null ? null : {
         seq: mirror.seq, paused: mirror.paused,
         seekTo: mirror.seekTo, startPos: mirror.startPos,
@@ -413,7 +437,7 @@ if (typeof iina !== "undefined") {
     if (suppressSync || mirror === null) return;
     if (state.mode !== "dlna" && state.mode !== "airplay") return;
     if (state.phase !== "starting" && state.phase !== "ready" && state.phase !== "packaged") return;
-    var tracks = selectTracks(mpv.getNative("track-list") || []);
+    var tracks = playerTracks();
     state.switchAudio = !!(tracks && tracks.amap !== state.amap);
   });
   // A new file invalidates the whole cast: the stream on the TV is the old
@@ -516,7 +540,7 @@ if (typeof iina !== "undefined") {
       // before either guard runs.)
       return refuse("needs a local file path");
     }
-    var tracks = selectTracks(mpv.getNative("track-list") || []);
+    var tracks = playerTracks();
     if (!tracks) return refuse("no castable video/audio tracks");
     return { src: src, tracks: tracks };
   }
@@ -550,8 +574,35 @@ if (typeof iina !== "undefined") {
     // the serve args are built inside resolveBinDir's callback, which runs
     // from a utils.exec promise, and nothing IINA-facing is called from there.
     var lanIP = lanIPOverride(preferences.get("lanIP"));
+    tvSeenPlaying = false;
+    tvWasPaused = false;
+    localAlignUntil = 0;
     var duration = mpv.getNumber("duration") || 0;
-    var startAt = mpv.getNumber("time-pos") || 0;
+    var livePos = mpv.getNumber("time-pos") || 0;
+    var startAt = livePos;
+    if (typeof opts.startAt === "number" && opts.startAt >= 0) startAt = opts.startAt;
+    else if (haveHeldPos) startAt = heldPos;
+    haveHeldPos = false;
+    // A file that is already playing pauses here, at the frame the TV will
+    // be given. The player stays paused until the TV is actually playing
+    // that frame. A file the user had paused stays paused. AirPlay keeps
+    // the muted mirror, so a pause taken during the search is released.
+    var resumeTogether = false;
+    if (!dlna) {
+      if (holdPlayback) {
+        holdPlayback = false;
+        mpv.set("pause", false);
+      }
+    } else if (!opts.forcePlay && (holdPlayback || !mpv.getFlag("pause"))) {
+      if (!mpv.getFlag("pause")) {
+        mpv.set("pause", true);
+        if (!opts.quiet) core.osd("Пауза: отправка на телевизор");
+      }
+      resumeTogether = true;
+      holdPlayback = false;
+    } else {
+      holdPlayback = false;
+    }
     var startPaused = opts.forcePlay ? false : !!mpv.getFlag("pause");
     var dlnaControl = dlna ? String(opts.control) : "";
     var dlnaName = dlna ? String(opts.name || "") : "";
@@ -563,12 +614,11 @@ if (typeof iina !== "undefined") {
       mode: dlna ? "dlna" : "airplay",
       dlnaName: dlnaName, dlnaControl: dlnaControl, devices: [], tv: null,
       base: 0, amap: tracks.amap, forcePlay: !!opts.forcePlay,
+      resumeTogether: resumeTogether, landed: false, joinUntil: 0,
       seenPos: startAt, seekPending: false, seekArmed: false, dlnaApplied: 0,
     };
-    // Muted mirror: keep mpv playing, silenced, instead of pausing. The page
-    // will best-effort seek the TV to startPos once wireless playback begins.
-    // A forced play (a backwards seek that has to recopy) leaves mpv paused
-    // until the TV is actually playing, so the two clocks start together.
+    // Muted on the Mac. DLNA waits, paused, until the TV reports it has
+    // seeked to startAt. AirPlay keeps playing into the mirror.
     mirror = newMirror(startAt, !!mpv.getFlag("mute"), startPaused);
     mpv.set("mute", true);
     if (dlna && dlnaName && !opts.quiet) core.osd("На телевизор: " + dlnaName);
@@ -616,6 +666,10 @@ if (typeof iina !== "undefined") {
             state.base = typeof ev.base === "number" ? ev.base : 0;
             console.log("[cast] stream ready at " + ev.url);
           }
+          else if (ev.event === "landed") {
+            state.landed = true;
+            state.landedOK = ev.ok !== false;
+          }
           else if (ev.event === "progress") { state.pct = ev.pct; }
           else if (ev.event === "packaged") { state.phase = state.phase === "ready" ? "packaged" : state.phase; state.pct = 100; }
           else if (ev.event === "tv") {
@@ -623,9 +677,14 @@ if (typeof iina !== "undefined") {
               pos: typeof ev.pos === "number" ? ev.pos : 0,
               paused: !!ev.paused, ended: !!ev.ended,
             };
+            state.tvAt = Date.now();
           }
-          else if (ev.event === "error") { state = { phase: "error", url: null, pct: 0, msg: ev.msg }; }
-          else if (ev.event === "stopped") { state = { phase: "idle", url: null, pct: 0, msg: null }; }
+          else if (ev.event === "error") {
+            state = { phase: "error", url: null, pct: 0, msg: ev.msg, resumeTogether: !!state.resumeTogether };
+          }
+          else if (ev.event === "stopped") {
+            state = { phase: "idle", url: null, pct: 0, msg: null, resumeTogether: !!state.resumeTogether };
+          }
         }
       }, function (errChunk) {
         // IINA's stderr handler keeps firing with "" after EOF until the
@@ -634,11 +693,13 @@ if (typeof iina !== "undefined") {
         if (line) console.log("[helper:stderr] " + line);
       }).then(function () {
         if (gen !== castGen) return;
-        if (state.phase !== "error") state = { phase: "idle", url: null, pct: 0, msg: null };
+        if (state.phase !== "error") {
+          state = { phase: "idle", url: null, pct: 0, msg: null, resumeTogether: !!state.resumeTogether };
+        }
       }).catch(function (e) {
         invalidateBinDirCache(); // helper failed to start; don't trust the cached dir next time
         if (gen !== castGen) return;
-        state = { phase: "error", url: null, pct: 0, msg: String(e) };
+        state = { phase: "error", url: null, pct: 0, msg: String(e), resumeTogether: !!state.resumeTogether };
       });
     });
   }
@@ -718,6 +779,15 @@ if (typeof iina !== "undefined") {
   function sendToTV() {
     if (state.phase === "starting" || state.phase === "ready" || state.phase === "packaged" || state.phase === "browsing") return;
     if (!localCastSource()) return;
+    // Freeze the frame for the whole search. A DLNA cast keeps this pause
+    // until the TV is on the same frame; an AirPlay cast lets it go.
+    heldPos = mpv.getNumber("time-pos") || 0;
+    haveHeldPos = true;
+    if (!mpv.getFlag("pause")) {
+      mpv.set("pause", true);
+      holdPlayback = true;
+      core.osd("Пауза: отправка на телевизор");
+    }
     discoverTargets();
   }
 
@@ -754,7 +824,7 @@ if (typeof iina !== "undefined") {
     stdoutRest = "";
     state = { phase: "idle", url: null, pct: 0, msg: null };
     var next = { forcePlay: !stayPaused, quiet: true };
-    if (mode === "dlna") startCast({ mode: "dlna", control: control, name: name, forcePlay: next.forcePlay, quiet: true });
+    if (mode === "dlna") startCast({ mode: "dlna", control: control, name: name, forcePlay: next.forcePlay, quiet: true, startAt: pos });
     else startCast(next);
     if (mirror) mirror.lastSetPos = { pos: pos, at: Date.now() };
     suppressSync = false;
@@ -769,10 +839,62 @@ if (typeof iina !== "undefined") {
     mpv.set("pause", false);
   }
 
-  // Arrow keys and the timeline both move time-pos. A jump larger than a
-  // poll interval is the user. A seek event whose position has not landed
-  // yet waits one poll, so we never send the TV the position from before
-  // the keypress. Our own drift correction is not a seek.
+  // The search failed or the cast died before the TV was ready. A file we
+  // paused for the handoff should play again; one the user had paused stays.
+  function releaseHeldPlayback() {
+    var held = holdPlayback || !!state.resumeTogether;
+    if (!held) return;
+    var ph = state.phase;
+    if (ph === "starting" || ph === "ready" || ph === "packaged" || ph === "browsing") return;
+    holdPlayback = false;
+    haveHeldPos = false;
+    state.resumeTogether = false;
+    mpv.set("pause", false);
+  }
+
+  // The TV is paused on the same frame. Tell it to play, and leave the
+  // player paused until the TV reports that it is actually playing. Starting
+  // the player in the same turn as the SOAP call is why it ran for a second
+  // before the television did.
+  function resumeTogetherIfLanded() {
+    if (!state.resumeTogether || !state.landed || mirror === null || state.mode !== "dlna") return;
+    if (state.phase !== "ready" && state.phase !== "packaged") return;
+    if (state.landedOK === false) {
+      state.resumeTogether = false;
+      core.osd("Телевизор не перешёл на текущее место фильма");
+      return;
+    }
+    if (!state.playSent) {
+      state.playSent = true;
+      dispatchDlna("play");
+      return;
+    }
+    if (!state.tv || state.tv.paused || state.tv.ended) return;
+    var target = mirror.startPos || 0;
+    var tvPos = state.tv.pos || 0;
+    if (target >= 1 && Math.abs(tvPos - target) > 4) return;
+    var age = state.tvAt ? (Date.now() - state.tvAt) / 1000 : 0;
+    if (age < 0 || age > 1.2) age = 0;
+    var joinAt = tvPos + age;
+    state.resumeTogether = false;
+    var here = mpv.getNumber("time-pos") || 0;
+    mirror = Object.assign({}, mirror, { paused: false, expectMpvPause: false });
+    if (Math.abs(joinAt - here) > 0.3 && Math.abs(joinAt - here) < 3) {
+      suppressSync = true;
+      mpv.set("time-pos", joinAt);
+      mirror.lastSetPos = { pos: joinAt, at: Date.now() };
+      state.seenPos = joinAt;
+      suppressSync = false;
+    }
+    state.joinUntil = Date.now() + 1500;
+    mpv.set("pause", false);
+  }
+
+  // Arrow keys and the timeline both move time-pos, and both raise a seek
+  // event. A jump of a few seconds with no seek event is the cache
+  // catching up after a stall: sending that to the TV is the reload and
+  // the download-speed meter. A seek event whose position has not landed
+  // yet waits one poll, so we never send the position from before the key.
   function observePlayback() {
     if (suppressSync || mirror === null) return;
     var pos = mpv.getNumber("time-pos") || 0;
@@ -793,7 +915,13 @@ if (typeof iina !== "undefined") {
       state.seenPos = pos;
       return;
     }
-    var jumped = Math.abs(pos - seen) > 1;
+    var jumped = Math.abs(pos - seen) > 8;
+    if (localAlignUntil && Date.now() < localAlignUntil) {
+      state.seekPending = false;
+      state.seekArmed = false;
+      state.seenPos = pos;
+      return;
+    }
     if (pending && !jumped && !state.seekArmed) {
       state.seekArmed = true;
       return;
@@ -812,6 +940,14 @@ if (typeof iina !== "undefined") {
   // Returns true when the cast was torn down (the TV finished).
   function syncClock() {
     if (mirror === null || state.mode !== "dlna" || !state.tv) return false;
+    if (state.tv.ended) {
+      // Fall through: ending the movie still tears the cast down.
+    } else if (state.joinUntil && Date.now() < state.joinUntil && state.tv.paused && !mirror.paused) {
+      // Play was just sent. The next position report can still say paused
+      // and would otherwise put the player back on pause.
+      return false;
+    }
+    if (!state.tv.paused) state.joinUntil = 0;
     var r = mirrorOnTvState(mirror, {
       appliedSeq: state.dlnaApplied || 0,
       pos: state.tv.pos || 0,
@@ -826,31 +962,68 @@ if (typeof iina !== "undefined") {
       mpv.set("pause", r.setMpvPaused);
       suppressSync = false;
     }
-    if (r.setMpvPos !== null) {
-      suppressSync = true;
-      mpv.set("time-pos", r.setMpvPos);
-      suppressSync = false;
-      state.seenPos = r.setMpvPos;
+    // Steady playback is left a second or two apart: seeking the local file
+    // to erase that is the rewind and the download meter. A pause that the
+    // user then releases is different — the stall has already happened, and
+    // the two clocks are put back together without asking the TV to reopen.
+    if (!state.tv.paused) {
+      if (tvSeenPlaying && tvWasPaused) {
+        if (alignMpvToTV()) tvWasPaused = false;
+      } else {
+        tvWasPaused = false;
+      }
+      tvSeenPlaying = true;
+    } else {
+      tvWasPaused = true;
     }
     return false;
+  }
+
+  function alignMpvToTV() {
+    if (mirror === null || state.mode !== "dlna" || !state.tv || state.tv.ended) return true;
+    if (state.tv.paused) return false;
+    if (mirror.seekTo) return true;
+    if (mirror.holdUntil && Date.now() < mirror.holdUntil) return true;
+    // Play was issued on this poll but not recorded yet. Try again next time,
+    // still remembering that this resume has not been aligned.
+    if ((state.dlnaApplied || 0) < mirror.seq) return false;
+    if (mpv.getFlag("pause")) return false;
+    var age = state.tvAt ? (Date.now() - state.tvAt) / 1000 : 0;
+    if (age < 0 || age > 1.2) age = 0;
+    var there = (state.tv.pos || 0) + age;
+    var here = mpv.getNumber("time-pos") || 0;
+    var gap = Math.abs(there - here);
+    if (gap <= 0.6 || gap > 180) return true;
+    suppressSync = true;
+    mpv.set("time-pos", there);
+    mirror.lastSetPos = { pos: there, at: Date.now() };
+    state.seenPos = there;
+    localAlignUntil = Date.now() + 2000;
+    suppressSync = false;
+    return true;
   }
 
   // One SOAP for the latest seek or pause. Runs from the poll, so it still
   // happens when the sidebar page is not the thing driving the TV.
   function pushPlayback() {
-    if (mirror === null || state.mode !== "dlna" || !state.dlnaControl || !state.tv) return;
+    if (mirror === null || state.mode !== "dlna" || !state.dlnaControl) return;
     var applied = state.dlnaApplied || 0;
     if (mirror.seq <= applied) return;
     if (mirror.seekTo && mirror.seekTo.seq > applied) {
       if (dispatchDlna("seek", mirror.seekTo.pos)) return;
     }
-    if (!!mirror.paused !== !!state.tv.paused) dispatchDlna(mirror.paused ? "pause" : "play");
+    // Before the first position report the helper has the TV paused, which
+    // is the state Play has to leave.
+    var tvPaused = state.tv ? !!state.tv.paused : true;
+    if (!!mirror.paused !== tvPaused) dispatchDlna(mirror.paused ? "pause" : "play");
     state.dlnaApplied = mirror.seq;
   }
 
   function onMainPoll() {
     reapMirror();
+    releaseHeldPlayback();
     observePlayback();
+    resumeTogetherIfLanded();
     if (syncClock()) return;
     pushPlayback();
     consumePending();
@@ -860,7 +1033,7 @@ if (typeof iina !== "undefined") {
   function consumePending() {
     if (state.switchAudio) {
       state.switchAudio = false;
-      var tracksNow = selectTracks(mpv.getNative("track-list") || []);
+      var tracksNow = playerTracks();
       if (tracksNow && tracksNow.amap !== state.amap &&
           (state.phase === "starting" || state.phase === "ready" || state.phase === "packaged")) {
         var pos = (state.tv && typeof state.tv.pos === "number") ? state.tv.pos : (mpv.getNumber("time-pos") || 0);
@@ -883,8 +1056,19 @@ if (typeof iina !== "undefined") {
     else startCast();
   }
 
+  // sub-visibility is the subtitle button. The track stays selected while hidden.
+  function playerTracks() {
+    return selectTracks(mpv.getNative("track-list") || [], !!mpv.getFlag("sub-visibility"));
+  }
+
   function stopCast() {
     var control = (state.mode === "dlna" && state.dlnaControl) ? state.dlnaControl : "";
+    var resumeLocal = holdPlayback || !!state.resumeTogether;
+    holdPlayback = false;
+    haveHeldPos = false;
+    tvSeenPlaying = false;
+    tvWasPaused = false;
+    localAlignUntil = 0;
     endMirror();
     castGen++; // invalidate any in-flight cast's callbacks
     resolveBinDir(function (binDir, resolveErr) {
@@ -898,25 +1082,18 @@ if (typeof iina !== "undefined") {
       utils.exec(binDir + "/airplay-helper", ["stop", "-out", utils.resolvePath("@tmp/hls")]);
     });
     state = { phase: "idle", url: null, pct: 0, msg: null };
+    if (resumeLocal) mpv.set("pause", false);
   }
 
-  // Returns true when the seek had to rebuild the file (the target is
-  // before the bytes currently on the TV). The caller must not keep using
-  // the cast state from before that rebuild.
+  // Seek and pause are one SOAP call each. Rebuilding the file here made a
+  // large movie copy itself again, which is the cache-speed meter and the
+  // stall on both screens. The time sent is IINA's time, not a position
+  // inside a clipped copy.
   function dispatchDlna(action, pos) {
     if (state.mode !== "dlna" || !state.dlnaControl) return false;
     if (action !== "play" && action !== "pause" && action !== "seek" && action !== "stop") return false;
     var control = state.dlnaControl;
-    if (action === "seek") {
-      var abs = typeof pos === "number" ? pos : 0;
-      var base = state.base || 0;
-      if (abs + 0.5 < base) {
-        core.osd("Перемотка");
-        restartAt(abs, !(mirror && !mirror.paused));
-        return true;
-      }
-      pos = Math.max(0, abs - base);
-    }
+    if (action === "seek") pos = Math.max(0, typeof pos === "number" ? pos : 0);
     resolveBinDir(function (binDir, resolveErr) {
       if (resolveErr) { console.log("[dlna] " + resolveErr); return; }
       var args = ["dlna-ctl", "-control", control, "-action", action];
@@ -997,12 +1174,16 @@ if (typeof iina !== "undefined") {
       reapMirror(); // a helper-initiated teardown may have left a stale mirror
                     // un-reaped; don't mpv.set against a dead stream.
       if (mirror === null || !tv) return;
+      if (state.joinUntil && Date.now() < state.joinUntil && tv.paused && !mirror.paused) return;
       var r = mirrorOnTvState(mirror, tv, mpv.getNumber("time-pos") || 0,
                               !!mpv.getFlag("pause"), Date.now());
       mirror = r.m;
       if (r.teardown) { stopCast(); return; }
       if (r.setMpvPaused !== null) mpv.set("pause", r.setMpvPaused);
-      if (r.setMpvPos !== null) mpv.set("time-pos", r.setMpvPos);
+      // DLNA drift is not pulled into the local file from this poll. Doing
+      // so reopens a large movie and the TV shows the download meter. The
+      // resume path in syncClock is the one that puts the clocks back together.
+      if (r.setMpvPos !== null && state.mode !== "dlna") mpv.set("time-pos", r.setMpvPos);
     });
     sidebarLoaded = true;
   }

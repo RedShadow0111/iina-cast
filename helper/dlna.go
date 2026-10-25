@@ -25,18 +25,17 @@ type Device struct {
 }
 
 // planDirect reports whether the source file can be handed to a renderer
-// as-is. Only an MP4/MOV the TV will open, with copyable video and audio,
-// and only when the caller does not need a different audio or subtitle
-// than the one the file would play by itself. MKV and the other containers
-// are remuxed to MP4: Xiaomi's renderer pulls a single MP4 and ignores the
-// track IINA had selected inside a multi-track file. forceRemux is that
-// case — more than one audio track, or a subtitle to embed.
+// as-is. An indexed container (MP4, MOV, MKV, MPEG-TS) with a copyable
+// video and audio track opens immediately and seeks to the movie's own
+// time. forceRemux is the one case that still copies: IINA selected an
+// audio track other than the file's first, which a direct open would not play.
 func planDirect(source, vcodec, acodec string, forceRemux bool) (bool, string) {
 	if forceRemux {
 		return false, ""
 	}
+	mime := mediaMIME(source)
 	switch strings.ToLower(extOf(source)) {
-	case ".mp4", ".m4v", ".mov":
+	case ".mp4", ".m4v", ".mov", ".mkv", ".ts", ".mts", ".m2ts":
 	default:
 		return false, ""
 	}
@@ -50,7 +49,10 @@ func planDirect(source, vcodec, acodec string, forceRemux bool) (bool, string) {
 	default:
 		return false, ""
 	}
-	return true, "video/mp4"
+	if mime == "" {
+		return false, ""
+	}
+	return true, mime
 }
 
 func mediaMIME(path string) string {
@@ -77,17 +79,22 @@ func extOf(path string) string {
 }
 
 // dlnaFeatures is the fourth field of a protocolInfo and the matching
-// contentFeatures.dlna.org header. OP=01 tells the renderer it may seek
-// with HTTP Range.
+// contentFeatures.dlna.org header.
+//
+// OP=11: the renderer may seek by bytes or by normal play time.
+// FLAGS are interactive, background and DLNA 1.5, with time seek, byte seek
+// and connection stalling. The streaming-transfer bit is left off: that bit
+// tells the television this is live, so it keeps only a few seconds buffered
+// and stutters at the start and again whenever the network dips.
 func dlnaFeatures(string) string {
-	return "DLNA.ORG_OP=01;DLNA.ORG_CI=0"
+	return "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=60F00000000000000000000000000000"
 }
 
 func protocolInfo(mime string) string {
 	return "http-get:*:" + mime + ":" + dlnaFeatures(mime)
 }
 
-func didlLite(title, uri, mime string, size int64, subURI string) string {
+func didlLite(title, uri, mime string, size int64, subURI string, duration float64) string {
 	if strings.TrimSpace(title) == "" {
 		title = "Video"
 	}
@@ -103,6 +110,18 @@ func didlLite(title, uri, mime string, size int64, subURI string) string {
 	b.WriteString(`<res protocolInfo="` + xmlEscape(protocolInfo(mime)) + `"`)
 	if size > 0 {
 		b.WriteString(` size="` + strconv.FormatInt(size, 10) + `"`)
+	}
+	if duration > 0 {
+		// The movie length, so the TV's clock is "56:23 of the film" and not
+		// the length of whatever bytes have been copied so far.
+		b.WriteString(` duration="` + formatRelTime(duration) + `"`)
+	}
+	if size > 0 && duration > 0.5 {
+		// Bits per second. Renderers use it to decide how much to buffer
+		// before showing the first frame.
+		if br := int64(float64(size) * 8 / duration); br > 0 {
+			b.WriteString(` bitrate="` + strconv.FormatInt(br, 10) + `"`)
+		}
 	}
 	b.WriteString(`>` + xmlEscape(uri) + `</res></item></DIDL-Lite>`)
 	return b.String()
@@ -120,6 +139,16 @@ func formatRelTime(sec float64) string {
 	}
 	t := int(sec)
 	return fmt.Sprintf("%d:%02d:%02d", t/3600, (t%3600)/60, t%60)
+}
+
+// formatRelTimePadded is the same clock with a two-digit hour. Some renderers
+// ignore "0:10:00" and accept "00:10:00".
+func formatRelTimePadded(sec float64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	t := int(sec)
+	return fmt.Sprintf("%02d:%02d:%02d", t/3600, (t%3600)/60, t%60)
 }
 
 // parseRelTime reads a UPnP REL_TIME value. Renderers that do not report a
@@ -147,6 +176,47 @@ func parseRelTime(s string) (float64, bool) {
 		nums[i] = n
 	}
 	return float64(nums[0]*3600 + nums[1]*60 + nums[2]), true
+}
+
+// parseTimeSeek reads a DLNA TimeSeekRange value ("npt=0:56:23.000-" or
+// "npt=3383.000-"). The number is the movie time the renderer wants, which
+// is what IINA shows.
+func parseTimeSeek(h string) (float64, bool) {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0, false
+	}
+	if i := strings.Index(strings.ToLower(h), "npt="); i >= 0 {
+		h = h[i+4:]
+	}
+	if j := strings.IndexByte(h, '-'); j >= 0 {
+		h = h[:j]
+	}
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0, false
+	}
+	frac := 0.0
+	if d := strings.IndexByte(h, '.'); d >= 0 {
+		f, err := strconv.ParseFloat("0"+h[d:], 64)
+		if err != nil || f < 0 {
+			return 0, false
+		}
+		frac = f
+		h = h[:d]
+	}
+	if strings.Contains(h, ":") {
+		sec, ok := parseRelTime(h)
+		if !ok {
+			return 0, false
+		}
+		return sec + frac, true
+	}
+	sec, err := strconv.ParseFloat(h, 64)
+	if err != nil || sec < 0 {
+		return 0, false
+	}
+	return sec + frac, true
 }
 
 func validateControlURL(raw string) (string, error) {

@@ -18,7 +18,7 @@ function loadPlugin(opts = {}) {
   const posted = [];         // [name, payload] sent to the page
   const osd = [];
   const writes = [];
-  const flags = { pause: !!opts.pause, mute: opts.mute || false };
+  const flags = { pause: !!opts.pause, mute: opts.mute || false, "sub-visibility": opts.subsVisible !== false };
   const sets = [];           // [name, value] pushed by mpv.set
   const events = {};         // event name -> callback registered via event.on
   const stdouts = [];        // per-serve stdout callbacks, for scripting helper events
@@ -376,6 +376,17 @@ test("a seek event that arrives before time-pos waits for the new position", () 
   assert.deepEqual(p.state().sync.seekTo, { seq: 1, pos: 80 });
 });
 
+test("a small time jump is not sent to the TV", () => {
+  const p = loadPlugin({ timePos: 100 });
+  p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
+  p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 0 });
+  p.helperSays({ event: "tv", pos: 100, paused: false, ended: false });
+  p.flags["time-pos"] = 103;
+  p.send("getState");
+  const ctl = p.execs.filter((e) => e.args[0] === "dlna-ctl" && e.args.includes("seek"));
+  assert.equal(ctl.length, 0);
+});
+
 test("a timeline jump is sent to the TV without a seek event", () => {
   const p = loadPlugin({ timePos: 10 });
   p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
@@ -417,6 +428,51 @@ test("a TV-remote pause is mirrored into mpv", () => {
   p.beginCast();
   p.send("tvState", { appliedSeq: 0, pos: 42, paused: true, wireless: true, ended: false });
   assert.deepEqual(p.sets.filter(([k]) => k === "pause").at(-1), ["pause", true]);
+});
+
+test("DLNA playback does not seek the local file to erase a small drift", () => {
+  const p = loadPlugin({ timePos: 100 });
+  p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
+  p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 0 });
+  p.helperSays({ event: "tv", pos: 106, paused: false, ended: false });
+  p.send("getState");
+  p.send("tvState", { appliedSeq: 0, pos: 106, paused: false, wireless: true, ended: false });
+  assert.ok(!p.sets.some(([k]) => k === "time-pos"), "a drift seek is the mid-movie rebuffer");
+});
+
+test("resuming after a stall puts the player on the television clock without reopening it", () => {
+  const p = loadPlugin({ timePos: 500 });
+  p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
+  p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 0 });
+  p.helperSays({ event: "landed", pos: 500, ok: true });
+  p.send("getState");
+  p.helperSays({ event: "tv", pos: 500, paused: false, ended: false });
+  p.send("getState");
+  assert.equal(p.flags.pause, false);
+  // The television stalls at 505 while the local file keeps going. Each step
+  // is under the jump threshold, so it must not be sent to the TV as a seek.
+  for (let pos = 505; pos <= 530; pos += 5) {
+    p.flags["time-pos"] = pos;
+    p.helperSays({ event: "tv", pos: 505, paused: false, ended: false });
+    p.send("getState");
+  }
+  assert.ok(!p.sets.some(([k]) => k === "time-pos"), "steady playback is not pulled back");
+  const seeksBefore = p.execs.filter((e) => e.args[0] === "dlna-ctl" && e.args.includes("seek")).length;
+  p.flags.pause = true;
+  p.fire("mpv.pause.changed");
+  p.send("getState");
+  p.helperSays({ event: "tv", pos: 505, paused: true, ended: false });
+  p.send("getState");
+  p.flags.pause = false;
+  p.fire("mpv.pause.changed");
+  p.send("getState");
+  p.helperSays({ event: "tv", pos: 505, paused: false, ended: false });
+  p.send("getState");
+  const tp = p.sets.filter(([k]) => k === "time-pos");
+  assert.ok(tp.length >= 1, "resume catches the player up to the television");
+  assert.ok(Math.abs(tp.at(-1)[1] - 505) < 1.5, "landed on " + tp.at(-1)[1]);
+  const seeksAfter = p.execs.filter((e) => e.args[0] === "dlna-ctl" && e.args.includes("seek")).length;
+  assert.equal(seeksAfter, seeksBefore, "catching up must not make the TV reopen the movie");
 });
 
 test("drift beyond tolerance corrects mpv's clock to the TV's", () => {
@@ -722,13 +778,14 @@ test("choosing a DLNA renderer serves that device instead of HLS", () => {
   assert.equal(args[args.indexOf("-dlna") + 1], "http://192.168.0.220/ctl");
   assert.equal(args[args.indexOf("-title") + 1], "a");
   assert.equal(args[args.indexOf("-start") + 1], "42");
-  assert.equal(args.indexOf("-paused"), -1);
+  assert.notEqual(args.indexOf("-paused"), -1, "the TV waits, paused, on the same frame");
+  assert.equal(p.flags.pause, true, "the player waits with it");
   assert.equal(args.indexOf("-remux"), -1, "one audio track in the helper's own decision");
   assert.equal(p.state().mode, "dlna");
   assert.equal(p.state().dlnaName, "CustomCars");
 });
 
-test("a DLNA cast remuxes when IINA has several audio tracks", () => {
+test("a DLNA cast remuxes when IINA selects a later audio track", () => {
   const p = loadPlugin({ tracks: [
     { type: "video", selected: true, codec: "hevc", "ff-index": 0 },
     { type: "audio", selected: false, codec: "aac", "ff-index": 1, "demux-channel-count": 2 },
@@ -745,6 +802,50 @@ test("a paused DLNA cast asks the TV to start paused", () => {
   const p = loadPlugin({ pause: true });
   p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
   assert.notEqual(serves(p)[0].args.indexOf("-paused"), -1);
+  p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 0 });
+  p.helperSays({ event: "landed", pos: 42 });
+  p.send("getState");
+  assert.equal(p.flags.pause, true, "a file the user had paused stays paused");
+  assert.equal(p.execs.filter((e) => e.args[0] === "dlna-ctl" && e.args.includes("play")).length, 0);
+});
+
+test("a playing file pauses until the TV is on that frame, then both play", () => {
+  const p = loadPlugin({ timePos: 42 });
+  p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
+  assert.equal(p.flags.pause, true);
+  p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 0 });
+  p.helperSays({ event: "landed", pos: 42, ok: true });
+  p.send("getState");
+  assert.equal(p.flags.pause, true, "the player waits until the TV is actually playing");
+  const play = p.execs.filter((e) => e.args[0] === "dlna-ctl" && e.args.includes("play"));
+  assert.equal(play.length, 1);
+  p.helperSays({ event: "tv", pos: 42, paused: false, ended: false });
+  p.send("getState");
+  assert.equal(p.flags.pause, false);
+  assert.equal(p.state().sync.paused, false);
+  assert.equal(p.execs.filter((e) => e.args[0] === "dlna-ctl" && e.args.includes("play")).length, 1);
+});
+
+test("the cast keeps the position from before the player was paused", () => {
+  const p = loadPlugin({ timePos: 500 });
+  p.send("cast");
+  assert.equal(p.flags.pause, true);
+  p.flags["time-pos"] = 0;
+  p.helperSays({ event: "devices", devices: [
+    { name: "CustomCars", control: "http://192.168.0.220/ctl", host: "192.168.0.220" },
+  ], airplay: [] });
+  p.send("getState");
+  const args = serves(p)[0].args;
+  assert.equal(args[args.indexOf("-start") + 1], "500");
+});
+
+test("a failed search resumes the file that was playing", () => {
+  const p = loadPlugin();
+  p.send("cast");
+  assert.equal(p.flags.pause, true);
+  p.helperSays({ event: "error", msg: "discovery failed" });
+  p.send("getState");
+  assert.equal(p.flags.pause, false);
 });
 
 test("an AirPlay cast does not pass DLNA flags", () => {
@@ -774,31 +875,39 @@ test("the page can pause and seek the DLNA renderer", () => {
   assert.equal(ctls[1].args[ctls[1].args.indexOf("-action") + 1], "pause");
 });
 
-test("a seek into a tail copy is sent relative to where that copy starts", () => {
+test("a seek is sent as IINA's time, not a position inside a clipped copy", () => {
   const p = loadPlugin();
   p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
   p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 40 });
   p.send("dlnaCtl", { action: "seek", pos: 90 });
   const ctl = p.execs.filter((e) => e.args[0] === "dlna-ctl").at(-1);
-  assert.equal(ctl.args[ctl.args.indexOf("-pos") + 1], "50");
+  assert.equal(ctl.args[ctl.args.indexOf("-pos") + 1], "90");
   assert.equal(serves(p).length, 1);
 });
 
-test("a seek before the copied tail recasts from that position and resumes", () => {
+test("a seek does not recopy the file", () => {
   const p = loadPlugin({ timePos: 40 });
   p.send("start", { mode: "dlna", control: "http://192.168.0.220/ctl", name: "TV" });
   p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 40 });
-  p.send("dlnaCtl", { action: "seek", pos: 10 });
-  const args = serves(p).at(-1).args;
-  assert.equal(serves(p).length, 2);
-  assert.equal(args[args.indexOf("-start") + 1], "10");
-  assert.equal(args.indexOf("-paused"), -1);
-  assert.equal(p.flags.pause, true);
-  assert.deepEqual(p.writes.at(-1), ["@tmp/hls/hold", "1"]);
-  p.helperSays({ event: "ready", url: "http://192.168.0.84:9/media", base: 10 });
-  p.helperSays({ event: "tv", pos: 10, paused: false, ended: false });
-  p.send("getState");
-  assert.equal(p.flags.pause, false);
+  p.helperSays({ event: "tv", pos: 40, paused: false, ended: false });
+  p.send("dlnaCtl", { action: "seek", pos: 3383 });
+  assert.equal(serves(p).length, 1);
+  const ctl = p.execs.filter((e) => e.args[0] === "dlna-ctl").at(-1);
+  assert.equal(ctl.args[ctl.args.indexOf("-pos") + 1], "3383");
+  assert.equal(p.writes.length, 0);
+});
+
+test("hidden subtitles are reported as off", () => {
+  const p = loadPlugin({
+    subsVisible: false,
+    tracks: [
+      { type: "video", selected: true, codec: "hevc", "ff-index": 0 },
+      { type: "audio", selected: true, codec: "aac", "ff-index": 1, "demux-channel-count": 2 },
+      { type: "sub", selected: true, codec: "subrip", "ff-index": 2, lang: "ru" },
+    ],
+  });
+  p.send("getState", {});
+  assert.equal(p.state().subs.label, "No subtitles");
 });
 
 test("switching the audio track pauses, syncs to the TV and recasts that track", () => {

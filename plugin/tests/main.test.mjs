@@ -14,7 +14,7 @@ const mpvTracks = [
 test("selectTracks picks selected audio and first video", () => {
   const r = selectTracks(mpvTracks);
   assert.deepEqual(r, {
-    vcodec: "hevc", acodec: "truehd", achannels: 8, vmap: 0, amap: 2, audioCount: 2,
+    vcodec: "hevc", acodec: "truehd", achannels: 8, vmap: 0, amap: 2, firstAmap: 1, audioCount: 2,
     sub: { path: null, smap: 3, lang: "", title: "" }, subDropped: false,
   });
 });
@@ -314,11 +314,21 @@ test("no receiver is an empty result", () => {
   assert.equal(chooseCast([], [{ model: "MacBookAir10,1" }]).mode, "none");
 });
 
-test("needsSelectedRemux when IINA's audio or subtitle would be lost", () => {
-  const one = selectTracks([
-    { type: "video", selected: true, codec: "h264", "ff-index": 0 },
+test("needsSelectedRemux only when the selected audio is not the file's first", () => {
+  const first = selectTracks([
+    { type: "video", selected: true, codec: "hevc", "ff-index": 0 },
     { type: "audio", selected: true, codec: "aac", "ff-index": 1 },
+    { type: "audio", selected: false, codec: "ac3", "ff-index": 2 },
+    { type: "sub", selected: true, codec: "subrip", "ff-index": 3, lang: "ru" },
   ]);
-  assert.equal(needsSelectedRemux(one), false);
+  assert.equal(needsSelectedRemux(first), false);
   assert.equal(needsSelectedRemux(selectTracks(mpvTracks)), true);
+});
+
+test("selectTracks ignores a selected subtitle when subtitles are hidden", () => {
+  const r = selectTracks(mpvTracks.map(t =>
+    t.type === "sub" ? { ...t, lang: "ru" } : t), false);
+  assert.equal(r.sub, null);
+  assert.equal(r.subDropped, false);
+  assert.equal(subtitleLabel(r).label, "No subtitles");
 });

@@ -10,15 +10,20 @@ import (
 )
 
 func TestPlanDirect(t *testing.T) {
-	if ok, _ := planDirect("/movies/a.mkv", "hevc", "aac", false); ok {
-		t.Fatal("mkv is remuxed to mp4 so the renderer plays the selected track")
+	ok, mime := planDirect("/movies/a.mkv", "hevc", "aac", false)
+	if !ok || mime != "video/x-matroska" {
+		t.Fatalf("mkv hevc/aac should be served directly, got %v %q", ok, mime)
 	}
-	ok, mime := planDirect("/movies/a.mp4", "h264", "eac3", false)
+	ok, mime = planDirect("/movies/a.mp4", "h264", "eac3", false)
 	if !ok || mime != "video/mp4" {
 		t.Fatalf("mp4 h264/eac3 should be served directly, got %v %q", ok, mime)
 	}
+	ok, mime = planDirect("/movies/a.ts", "h264", "ac3", false)
+	if !ok || mime != "video/mp2t" {
+		t.Fatalf("mpegts should be served directly, got %v %q", ok, mime)
+	}
 	if ok, _ = planDirect("/movies/a.mp4", "h264", "aac", true); ok {
-		t.Fatal("a selected extra audio track or subtitle forces a remux")
+		t.Fatal("a non-default audio track forces a remux")
 	}
 	if ok, _ = planDirect("/movies/a.mkv", "hevc", "truehd", false); ok {
 		t.Fatal("truehd audio has to be transcoded")
@@ -52,12 +57,15 @@ func TestParseRelTime(t *testing.T) {
 }
 
 func TestDIDLEscapesTitleAndCarriesSubtitle(t *testing.T) {
-	doc := didlLite(`A & B`, "http://10.0.0.5:9/media", "video/mp4", 100, "http://10.0.0.5:9/sub.srt")
+	doc := didlLite(`A & B`, "http://10.0.0.5:9/media", "video/mp4", 100, "http://10.0.0.5:9/sub.srt", 3723)
 	if !strings.Contains(doc, "A &amp; B") {
 		t.Fatalf("title was not escaped:\n%s", doc)
 	}
-	if !strings.Contains(doc, `protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0"`) {
+	if !strings.Contains(doc, `protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=60F00000000000000000000000000000"`) {
 		t.Fatalf("protocolInfo missing:\n%s", doc)
+	}
+	if !strings.Contains(doc, `duration="1:02:03"`) {
+		t.Fatalf("duration missing:\n%s", doc)
 	}
 	if !strings.Contains(doc, `size="100"`) || !strings.Contains(doc, `sec:CaptionInfoEx`) || !strings.Contains(doc, `<sec:CaptionInfo `) {
 		t.Fatalf("size or subtitle missing:\n%s", doc)
@@ -174,7 +182,7 @@ func TestDLNAPlaySendsURIThenPlay(t *testing.T) {
 		w.Write([]byte(`<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body></s:Body></s:Envelope>`))
 	}))
 	defer srv.Close()
-	if err := dlnaPlay(t.Context(), srv.URL, "http://10.0.0.8/media", didlLite("A & B", "http://10.0.0.8/media", "video/mp4", 0, "")); err != nil {
+	if err := dlnaPlay(t.Context(), srv.URL, "http://10.0.0.8/media", didlLite("A & B", "http://10.0.0.8/media", "video/mp4", 0, "", 0)); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) != 2 || !strings.Contains(calls[0], "SetAVTransportURI") || !strings.Contains(calls[1], "Play") {
@@ -191,6 +199,38 @@ func TestAVActionSurfacesFault(t *testing.T) {
 	_, err := avAction(t.Context(), srv.URL, "Play", [][2]string{{"InstanceID", "0"}, {"Speed", "1"}})
 	if err == nil || !strings.Contains(err.Error(), "Transition not available") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestParkPlaybackSeeksUntilTheClockMatches(t *testing.T) {
+	pos := "0:00:00"
+	state := "PLAYING"
+	var seeks []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		action := r.Header.Get("SOAPAction")
+		payload := ""
+		switch {
+		case strings.Contains(action, "Seek"):
+			seeks = append(seeks, string(body))
+			if strings.Contains(string(body), "0:10:00") || strings.Contains(string(body), "00:10:00") {
+				pos = "0:10:00"
+			}
+		case strings.Contains(action, "Pause"):
+			state = "PAUSED_PLAYBACK"
+		case strings.Contains(action, "GetTransportInfo"):
+			payload = "<CurrentTransportState>" + state + "</CurrentTransportState>"
+		case strings.Contains(action, "GetPositionInfo"):
+			payload = "<RelTime>" + pos + "</RelTime>"
+		}
+		w.Write([]byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` + payload + `</s:Body></s:Envelope>`))
+	}))
+	defer srv.Close()
+	if !parkPlayback(t.Context(), srv.URL, 600, true) {
+		t.Fatal("seek never landed on 10:00")
+	}
+	if len(seeks) == 0 || state != "PAUSED_PLAYBACK" || pos != "0:10:00" {
+		t.Fatalf("seeks=%d state=%s pos=%s", len(seeks), state, pos)
 	}
 }
 
